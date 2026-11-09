@@ -45,23 +45,50 @@ test('flushes a final active utterance when capture stops', () => {
   assert.ok(utterances[0].length >= FRAME_BYTES * 8);
 });
 
-test('splits long speech into bounded segments with overlap', () => {
+test('splits long speech into bounded segments that neither overlap nor drop audio', () => {
   const utterances = [];
   const segmenter = new UtteranceSegmenter({
     channel: 'you',
     preRollMs: 60,
     minUtteranceMs: 30,
     maxUtteranceMs: 300,
-    overlapMs: 60,
     onUtterance: (_channel, pcm) => utterances.push(pcm)
   });
   pushFrames(segmenter, 1000, 24);
   segmenter.stop();
 
-  assert.ok(utterances.length >= 3);
+  // Steady speech has no pause to cut at, so segments run to the full limit.
+  assert.equal(utterances.length, 3);
   assert.equal(utterances[0].length, FRAME_BYTES * 10);
   assert.equal(utterances[1].length, FRAME_BYTES * 10);
   assert.ok(utterances.every((pcm) => pcm.length <= FRAME_BYTES * 10));
+  // Every pushed sample is transcribed exactly once.
+  const total = utterances.reduce((sum, pcm) => sum + pcm.length, 0);
+  assert.equal(total, FRAME_BYTES * 24);
+});
+
+test('splits over-long speech at a pause instead of mid-word', () => {
+  const utterances = [];
+  const segmenter = new UtteranceSegmenter({
+    channel: 'you',
+    preRollMs: 60,
+    minUtteranceMs: 30,
+    maxUtteranceMs: 600, // 20 frames
+    // A long hangover so the brief dip below is not treated as end of speech.
+    vadOptions: { silenceFrames: 40 },
+    onUtterance: (_channel, pcm) => utterances.push(pcm)
+  });
+  pushFrames(segmenter, 1000, 14);
+  pushFrames(segmenter, 20, 2);   // a short pause between words, frames 15-16
+  pushFrames(segmenter, 1000, 14);
+  segmenter.stop();
+
+  assert.equal(utterances.length, 2);
+  // The first segment ends inside the pause (frames 15-16), not at frame 20.
+  assert.ok(utterances[0].length > FRAME_BYTES * 14, 'cut is after the last loud frame before the pause');
+  assert.ok(utterances[0].length < FRAME_BYTES * 16, 'cut is before speech resumes');
+  const total = utterances.reduce((sum, pcm) => sum + pcm.length, 0);
+  assert.equal(total, FRAME_BYTES * 30, 'no audio is duplicated or lost at the boundary');
 });
 
 test('cancels a brief noise spike below minSpeechFrames without staying stuck collecting silence', () => {

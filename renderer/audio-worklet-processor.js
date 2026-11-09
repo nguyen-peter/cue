@@ -2,10 +2,17 @@
 // Replaces the deprecated ScriptProcessor. Receives Float32 audio, converts to Int16 PCM,
 // and sends to the main thread via MessagePort.
 
+// Samples sent per message: 100ms at the 16 kHz capture rate. This is how long
+// audio waits here before anything downstream can react to it — the streaming
+// transcriber, and the detector that decides a speaker has finished. It was
+// 4096 samples (256ms); at 1600 an IPC message goes out ten times a second per
+// channel, which is negligible.
+const CHUNK_SAMPLES = 1600;
+
 class CueAudioProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    this._bufferSize = 4096; // accumulate before sending (matches old ScriptProcessor)
+    this._bufferSize = CHUNK_SAMPLES;
     this._buffer = new Float32Array(this._bufferSize);
     this._writeIndex = 0;
   }

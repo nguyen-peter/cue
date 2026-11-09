@@ -12,6 +12,48 @@ const { CURRENT_GEMINI_DEFAULT } = require('./llm');
 // well inside it so base vocab + résumé terms never degrade recognition.
 const MAX_DEEPGRAM_KEYTERMS = 50;
 
+// Streaming 16 kHz -> 24 kHz resampler (linear interpolation, ratio 2:3).
+//
+// Audio arrives in small chunks. Resampling each chunk on its own has no "next
+// sample" for the last few outputs, so it repeats the final sample — a small
+// step in the waveform at every chunk boundary, ten times a second. This keeps
+// the last sample and the output position between calls, so the stream comes
+// out exactly as if it had been resampled in one piece.
+class Resampler16to24 {
+  constructor() {
+    this.reset();
+  }
+
+  reset() {
+    this.previous = 0;       // last input sample of the previous chunk
+    this.positionThirds = 0; // next output position, in thirds of an input sample, relative to this chunk
+  }
+
+  process(pcm16kHz) {
+    const samples = Math.floor(pcm16kHz.length / 2);
+    if (!samples) return Buffer.alloc(0);
+    const sampleAt = (index) => (index < 0 ? this.previous : pcm16kHz.readInt16LE(index * 2));
+    const out = Buffer.alloc((Math.ceil(samples * 1.5) + 2) * 2);
+    let written = 0;
+    let position = this.positionThirds;
+    // An output between input samples i and i+1 needs both, so anything past
+    // the last sample waits for the next chunk.
+    while (Math.floor(position / 3) + 1 <= samples - 1) {
+      const index = Math.floor(position / 3);
+      const fraction = (position - index * 3) / 3;
+      const a = sampleAt(index);
+      const b = sampleAt(index + 1);
+      const value = Math.round(a + (b - a) * fraction);
+      out.writeInt16LE(Math.max(-32768, Math.min(32767, value)), written);
+      written += 2;
+      position += 2;
+    }
+    this.previous = pcm16kHz.readInt16LE((samples - 1) * 2);
+    this.positionThirds = position - samples * 3;
+    return out.subarray(0, written);
+  }
+}
+
 // ============================================================================
 // OpenAI Realtime Transcription Session (WebSocket)
 // Uses the dedicated transcription session type for lowest latency streaming STT
@@ -33,6 +75,7 @@ class OpenAIRealtimeSTT {
     this._reconnectDelay = 1000;
     this._pendingAudio = [];
     this._sessionReady = false;
+    this._resampler = new Resampler16to24();
   }
 
   async connect() {
@@ -40,6 +83,9 @@ class OpenAIRealtimeSTT {
 
     try {
       const WebSocket = require('ws');
+      // A new connection is a new audio stream: don't interpolate from the
+      // last sample of the previous one.
+      this._resampler.reset();
       // GA transcription endpoint: use ?intent=transcription (NOT ?model=)
       // The transcription model goes inside the session config
       const url = 'wss://api.openai.com/v1/realtime?intent=transcription';
@@ -115,7 +161,9 @@ class OpenAIRealtimeSTT {
         break;
 
       case 'conversation.item.input_audio_transcription.completed':
-        if (event.transcript && event.transcript.trim()) {
+        // Same silence-artifact filter the Deepgram and batch paths apply
+        // ("Thank you.", "Thanks for watching.").
+        if (event.transcript && event.transcript.trim() && !looksLikeHallucination(event.transcript)) {
           this.onTranscript(event.transcript.trim());
         }
         break;
@@ -147,42 +195,21 @@ class OpenAIRealtimeSTT {
       return;
     }
 
-    // Resample 16kHz -> 24kHz (linear interpolation) since the API requires 24kHz
-    const resampled = this._resample16to24(Buffer.from(pcmBuffer));
-    const b64 = resampled.toString('base64');
+    this._appendAudio(pcmBuffer);
+  }
+
+  // Resample 16kHz -> 24kHz (the API requires 24kHz) and append to the session.
+  _appendAudio(pcmBuffer) {
+    const resampled = this._resampler.process(Buffer.from(pcmBuffer));
+    if (!resampled.length) return;
     this._sendEvent({
       type: 'input_audio_buffer.append',
-      audio: b64
+      audio: resampled.toString('base64')
     });
   }
 
-  _resample16to24(pcm16kHz) {
-    // Linear interpolation from 16000 Hz to 24000 Hz (ratio 2:3)
-    const srcSamples = pcm16kHz.length / 2;
-    const dstSamples = Math.floor(srcSamples * 24000 / 16000);
-    const out = Buffer.alloc(dstSamples * 2);
-    for (let i = 0; i < dstSamples; i++) {
-      const srcPos = i * 16000 / 24000;
-      const idx = Math.floor(srcPos);
-      const frac = srcPos - idx;
-      const s0 = idx < srcSamples ? pcm16kHz.readInt16LE(idx * 2) : 0;
-      const s1 = (idx + 1) < srcSamples ? pcm16kHz.readInt16LE((idx + 1) * 2) : s0;
-      const sample = Math.round(s0 + (s1 - s0) * frac);
-      out.writeInt16LE(Math.max(-32768, Math.min(32767, sample)), i * 2);
-    }
-    return out;
-  }
-
   _flushPendingAudio() {
-    while (this._pendingAudio.length > 0) {
-      const chunk = this._pendingAudio.shift();
-      const resampled = this._resample16to24(Buffer.from(chunk));
-      const b64 = resampled.toString('base64');
-      this._sendEvent({
-        type: 'input_audio_buffer.append',
-        audio: b64
-      });
-    }
+    while (this._pendingAudio.length > 0) this._appendAudio(this._pendingAudio.shift());
   }
 
   _sendEvent(event) {
@@ -464,6 +491,7 @@ function createStreamingSTT(settings, channel, callbacks) {
 }
 
 module.exports = {
+  Resampler16to24,
   OpenAIRealtimeSTT,
   DeepgramStreamingSTT,
   createStreamingSTT,

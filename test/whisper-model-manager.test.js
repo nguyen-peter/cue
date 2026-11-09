@@ -139,6 +139,59 @@ test('imports only a file matching the selected model integrity contract', async
   assert.equal(fs.existsSync(manager.getModelPath(model.id)), false);
 });
 
+test('an untouched installed model is hashed once, not on every Listen', async (context) => {
+  const content = Buffer.from('installed model fixture');
+  const model = createFixtureModel(content);
+  const manager = new WhisperModelManager({
+    userDataPath: createTestDirectory(context),
+    models: [model],
+    fetchImpl: async () => { throw new Error('not used'); }
+  });
+  fs.mkdirSync(manager.modelDirectory, { recursive: true });
+  fs.writeFileSync(manager.getModelPath(model.id), content);
+
+  let hashes = 0;
+  const hash = manager._sha256.bind(manager);
+  manager._sha256 = (filePath) => { hashes += 1; return hash(filePath); };
+
+  assert.equal(await manager.verifyInstalledModel(model.id), manager.getModelPath(model.id));
+  assert.equal(hashes, 1);
+  await manager.verifyInstalledModel(model.id);
+  await manager.verifyInstalledModel(model.id);
+  assert.equal(hashes, 1, 'the second and third checks reuse the recorded verification');
+
+  // A new manager (app restart) still trusts the record on disk.
+  const restarted = new WhisperModelManager({ userDataPath: path.dirname(manager.modelDirectory), models: [model], fetchImpl: async () => { throw new Error('not used'); } });
+  let restartedHashes = 0;
+  const restartedHash = restarted._sha256.bind(restarted);
+  restarted._sha256 = (filePath) => { restartedHashes += 1; return restartedHash(filePath); };
+  await restarted.verifyInstalledModel(model.id);
+  assert.equal(restartedHashes, 0);
+});
+
+test('a model file that changed after verification is hashed again and rejected', async (context) => {
+  const content = Buffer.from('installed model fixture');
+  const model = createFixtureModel(content);
+  const manager = new WhisperModelManager({
+    userDataPath: createTestDirectory(context),
+    models: [model],
+    fetchImpl: async () => { throw new Error('not used'); }
+  });
+  fs.mkdirSync(manager.modelDirectory, { recursive: true });
+  const modelPath = manager.getModelPath(model.id);
+  fs.writeFileSync(modelPath, content);
+  await manager.verifyInstalledModel(model.id);
+
+  // Same size, different bytes, later timestamp.
+  const tampered = Buffer.from(content);
+  tampered[0] ^= 0xff;
+  fs.writeFileSync(modelPath, tampered);
+  const later = new Date(Date.now() + 5000);
+  fs.utimesSync(modelPath, later, later);
+
+  await assert.rejects(manager.verifyInstalledModel(model.id), /checksum mismatch/);
+});
+
 test('reports a missing selected model distinctly from a corrupt model', async (context) => {
   const content = Buffer.from('missing model fixture');
   const model = createFixtureModel(content);

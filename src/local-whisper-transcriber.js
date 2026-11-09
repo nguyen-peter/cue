@@ -14,7 +14,8 @@ class LocalWhisperTranscriber {
     onTranscript = () => {},
     onSpeechState = () => {},
     onStatus = () => {},
-    onError = () => {}
+    onError = () => {},
+    onTiming = () => {}
   }) {
     this.session = sessionFactory({ ...sessionOptions, onState: onStatus });
     this.segmenterFactory = segmenterFactory;
@@ -23,6 +24,10 @@ class LocalWhisperTranscriber {
     this.onSpeechState = onSpeechState;
     this.onStatus = onStatus;
     this.onError = onError;
+    // Reports, per utterance, how long it waited behind other utterances and
+    // how long inference took (both channels share one model, so one long
+    // utterance delays the next).
+    this.onTiming = onTiming;
     this.segmenters = new Map();
     this.queueTail = Promise.resolve();
     this.pendingJobs = 0;
@@ -85,9 +90,17 @@ class LocalWhisperTranscriber {
     this.pendingJobs += 1;
     this.onStatus({ status: 'transcribing', channel, pending: this.pendingJobs });
 
+    const queuedAt = Date.now();
     const job = this.queueTail.then(async () => {
       if (this.discardPendingJobs) return;
+      const startedAt = Date.now();
       const text = await this.session.transcribe(pcm);
+      this.onTiming({
+        channel,
+        waitMs: startedAt - queuedAt,
+        inferenceMs: Date.now() - startedAt,
+        audioMs: Math.round(pcm.length / 32) // 16 kHz, 16-bit mono
+      });
       if (text) this.onTranscript(channel, text);
     });
 

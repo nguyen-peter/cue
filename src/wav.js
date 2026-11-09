@@ -30,4 +30,43 @@ function rms16(pcm) {
   return Math.sqrt(sum / n);
 }
 
-module.exports = { pcmToWav, rms16 };
+// Where to split speech that has run past the length limit: the byte offset of
+// the quietest moment in the last `searchMs`, so the cut lands in a pause
+// between words rather than through one. When no window is clearly quieter
+// than the rest (continuous speech at a steady level) there is no good place,
+// and the full length is returned so segments stay as long as allowed.
+// Always sample-aligned, and never 0.
+function findQuietCut(pcm, { sampleRate = 16000, searchMs = 2000, windowMs = 40 } = {}) {
+  const bytesPerMs = (sampleRate * 2) / 1000;
+  const windowBytes = Math.floor((windowMs * bytesPerMs) / 2) * 2;
+  if (windowBytes < 2 || pcm.length < windowBytes * 4) return pcm.length;
+  const searchBytes = Math.min(pcm.length, Math.floor((searchMs * bytesPerMs) / 2) * 2);
+  const start = pcm.length - searchBytes;
+
+  let quietest = Infinity;
+  let quietestOffset = -1;
+  let total = 0;
+  let windows = 0;
+  for (let offset = start; offset + windowBytes <= pcm.length; offset += windowBytes) {
+    let energy = 0;
+    for (let i = offset; i < offset + windowBytes; i += 2) {
+      const sample = pcm.readInt16LE(i);
+      energy += sample * sample;
+    }
+    total += energy;
+    windows += 1;
+    // "<=" prefers the later of two equally quiet windows: a longer segment.
+    if (energy <= quietest) {
+      quietest = energy;
+      quietestOffset = offset;
+    }
+  }
+  if (quietestOffset < 0 || windows < 2) return pcm.length;
+  // Energy is amplitude squared: a quarter of the mean energy is half the
+  // mean loudness. Anything less distinct than that is not a pause.
+  if (quietest > (total / windows) * 0.25) return pcm.length;
+  const cut = quietestOffset + Math.floor(windowBytes / 4) * 2;
+  return cut > 0 ? cut : pcm.length;
+}
+
+module.exports = { pcmToWav, rms16, findQuietCut };

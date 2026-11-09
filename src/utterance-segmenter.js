@@ -1,11 +1,11 @@
 const { AdaptiveVAD, AudioRingBuffer } = require('./vad');
+const { findQuietCut } = require('./wav');
 
 const DEFAULT_SAMPLE_RATE = 16000;
 const PCM_BYTES_PER_SAMPLE = 2;
 const DEFAULT_PRE_ROLL_MS = 300;
 const DEFAULT_MIN_UTTERANCE_MS = 180;
 const DEFAULT_MAX_UTTERANCE_MS = 25000;
-const DEFAULT_OVERLAP_MS = 300;
 
 class UtteranceSegmenter {
   /** Segment one PCM channel into bounded utterances without writing audio to disk. */
@@ -15,7 +15,6 @@ class UtteranceSegmenter {
     preRollMs = DEFAULT_PRE_ROLL_MS,
     minUtteranceMs = DEFAULT_MIN_UTTERANCE_MS,
     maxUtteranceMs = DEFAULT_MAX_UTTERANCE_MS,
-    overlapMs = DEFAULT_OVERLAP_MS,
     vadOptions = {},
     onSpeechState = () => {},
     onUtterance = () => {}
@@ -25,7 +24,6 @@ class UtteranceSegmenter {
     this.sampleRate = sampleRate;
     this.minimumBytes = this._millisecondsToBytes(minUtteranceMs);
     this.maximumBytes = this._millisecondsToBytes(maxUtteranceMs);
-    this.overlapBytes = this._millisecondsToBytes(overlapMs);
     this.onSpeechState = onSpeechState;
     this.onUtterance = onUtterance;
     this.ringBuffer = new AudioRingBuffer(preRollMs, sampleRate);
@@ -103,16 +101,20 @@ class UtteranceSegmenter {
     this.onSpeechState(this.channel, false, 0);
   }
 
-  // Time O(n), space O(n) at each 25-second boundary; regular pushes are O(1).
+  // Someone talking past the length limit is split at the quietest moment in
+  // the last two seconds — a pause between words — and the next segment starts
+  // exactly there. (The split used to be at a fixed point, mid-word, with the
+  // segments overlapping by 300ms, which transcribed the boundary words twice.)
+  // Time O(n), space O(n) at each boundary; regular pushes are O(1).
   _appendChunk(chunk) {
     this.utteranceChunks.push(chunk);
     this.utteranceBytes += chunk.length;
 
     while (this.utteranceBytes >= this.maximumBytes) {
       const combined = Buffer.concat(this.utteranceChunks, this.utteranceBytes);
-      this._emit(combined.subarray(0, this.maximumBytes));
-      const nextStart = Math.max(0, this.maximumBytes - this.overlapBytes);
-      const remainder = Buffer.from(combined.subarray(nextStart));
+      const cut = findQuietCut(combined.subarray(0, this.maximumBytes), { sampleRate: this.sampleRate });
+      this._emit(combined.subarray(0, cut));
+      const remainder = Buffer.from(combined.subarray(cut));
       this.utteranceChunks = remainder.length ? [remainder] : [];
       this.utteranceBytes = remainder.length;
     }
@@ -143,6 +145,5 @@ module.exports = {
   DEFAULT_SAMPLE_RATE,
   DEFAULT_PRE_ROLL_MS,
   DEFAULT_MIN_UTTERANCE_MS,
-  DEFAULT_MAX_UTTERANCE_MS,
-  DEFAULT_OVERLAP_MS
+  DEFAULT_MAX_UTTERANCE_MS
 };

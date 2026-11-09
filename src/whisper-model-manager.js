@@ -6,6 +6,7 @@ const { finished } = require('stream/promises');
 const { WHISPER_MODELS } = require('./whisper-model-catalog');
 
 const MODEL_DIRECTORY_NAME = 'whisper-models';
+const VERIFIED_FILE_NAME = 'verified.json';
 const PROGRESS_INTERVAL_MS = 150;
 
 class WhisperModelManager {
@@ -165,12 +166,53 @@ class WhisperModelManager {
     }
   }
 
+  /**
+   * Confirm the installed model is the pinned artifact before it is loaded.
+   *
+   * Hashing reads the whole file, which is seconds for the large models and
+   * used to happen on every Listen. A file that hashed correctly is remembered
+   * by its size and modification time, so an untouched model is checked with
+   * one stat; anything that rewrites the file changes the timestamp and it is
+   * hashed again. Downloads and imports are always hashed in full.
+   */
   async verifyInstalledModel(modelId) {
     const model = this._requireModel(modelId);
     const modelPath = this.getModelPath(modelId);
     await fs.promises.access(modelPath, fs.constants.R_OK);
+    const stat = await fs.promises.stat(modelPath);
+    const fingerprint = { bytes: stat.size, mtimeMs: stat.mtimeMs, sha256: model.sha256 };
+    const verified = await this._readVerified();
+    const previous = verified[model.filename];
+    if (stat.size === model.bytes && previous
+      && previous.bytes === fingerprint.bytes
+      && previous.mtimeMs === fingerprint.mtimeMs
+      && previous.sha256 === fingerprint.sha256) {
+      return modelPath;
+    }
     await this._verifyArtifact(modelPath, model);
+    verified[model.filename] = fingerprint;
+    await this._writeVerified(verified);
     return modelPath;
+  }
+
+  _verifiedPath() {
+    return path.join(this.modelDirectory, VERIFIED_FILE_NAME);
+  }
+
+  async _readVerified() {
+    try {
+      const parsed = JSON.parse(await fs.promises.readFile(this._verifiedPath(), 'utf8'));
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  // Best effort: if the record cannot be written, the next Listen hashes again.
+  async _writeVerified(verified) {
+    try {
+      await fs.promises.writeFile(this._verifiedPath(), JSON.stringify(verified, null, 2));
+    } catch { /* ignore */ }
   }
 
   // Time O(n), space O(1): audio models can be several GB, so hash by stream.

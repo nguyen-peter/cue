@@ -36,29 +36,35 @@ class AdaptiveVAD {
     this.onSpeechEnd = options.onSpeechEnd || (() => {});
     this.onSpeechCancel = options.onSpeechCancel || (() => {});
     this.onVADState = options.onVADState || (() => {});
+
+    // Samples left over from the previous chunk that did not fill a frame.
+    this._carry = null;
   }
 
-  // Process a chunk of Int16 PCM audio
+  // Process a chunk of Int16 PCM audio. Chunks rarely hold a whole number of
+  // 30ms frames (a 100ms chunk is 3⅓), so the remainder is carried into the
+  // next call instead of being dropped — otherwise the detector never hears
+  // part of every chunk and its timing drifts from the real audio.
   processChunk(pcmBuffer) {
-    const samples = pcmBuffer.length / 2;
+    const data = this._carry ? Buffer.concat([this._carry, pcmBuffer]) : pcmBuffer;
+    const frameBytes = this.frameSize * 2;
     let offset = 0;
 
-    while (offset + this.frameSize * 2 <= pcmBuffer.length) {
-      const frame = pcmBuffer.slice(offset, offset + this.frameSize * 2);
-      const energy = this._computeRMS(frame);
-      this._processFrame(energy);
-      offset += this.frameSize * 2;
+    while (offset + frameBytes <= data.length) {
+      this._processFrame(this._computeRMS(data, offset, offset + frameBytes));
+      offset += frameBytes;
     }
+    this._carry = offset < data.length ? Buffer.from(data.subarray(offset)) : null;
   }
 
-  _computeRMS(frame) {
+  _computeRMS(pcm, start = 0, end = pcm.length) {
     let sum = 0;
-    const n = frame.length / 2;
-    for (let i = 0; i < frame.length; i += 2) {
-      const s = frame.readInt16LE(i);
+    const n = (end - start) / 2;
+    for (let i = start; i + 1 < end; i += 2) {
+      const s = pcm.readInt16LE(i);
       sum += s * s;
     }
-    return Math.sqrt(sum / n);
+    return n > 0 ? Math.sqrt(sum / n) : 0;
   }
 
   _processFrame(energy) {
@@ -138,6 +144,7 @@ class AdaptiveVAD {
     this.silenceFrameCount = 0;
     this.totalSpeechFrames = 0;
     this.noiseFloor = 80;
+    this._carry = null;
   }
 }
 
