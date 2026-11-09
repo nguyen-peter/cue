@@ -54,13 +54,16 @@ const DEFAULTS = {
   windowW: null,
   windowH: null,
   phoneToken: '',
+  // Context window (tokens) for the local Ollama model that writes Notes.
+  // Larger lets it read more of the notes per update, at the cost of speed and
+  // memory. See notesBudget() in src/notes.js.
+  notesContextTokens: 4096,
   models: {
     openai: { fast: 'gpt-4o-mini', smart: 'gpt-4o' },
-    anthropic: { fast: 'claude-3-5-haiku-latest', smart: 'claude-3-5-sonnet-latest' },
-    // Kept in sync with CURRENT_GEMINI_DEFAULT in src/llm.js — gemini-2.0-flash
-    // (the previous default here) was retired by Google on 2026-03-03 and 404s
-    // on every request. gemini-2.5-flash is current and free-tier available.
-    gemini: { fast: 'gemini-2.5-flash', smart: 'gemini-2.5-flash' },
+    // Kept in sync with DEFAULT_MODELS / DEFAULT_SMART_MODELS in src/llm.js,
+    // which also explains why these ids were chosen and when they were checked.
+    anthropic: { fast: 'claude-haiku-5-5', smart: 'claude-sonnet-5-5' },
+    gemini: { fast: 'gemini-3.5-flash-lite', smart: 'gemini-3.8-flash' },
     custom: { fast: '', smart: '' },
     ollama: { fast: 'llama3.2', smart: 'llama3.3' },
     groq: { fast: 'llama-3.1-8b-instant', smart: 'llama-3.3-70b-versatile' },

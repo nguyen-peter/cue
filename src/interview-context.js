@@ -87,26 +87,50 @@ const CATEGORY_PATTERNS = {
   ],
 };
 
+function classifyText(text) {
+  for (const [category, patterns] of Object.entries(CATEGORY_PATTERNS)) {
+    if (patterns.some(re => re.test(text))) return category;
+  }
+  return null;
+}
+
+const RECENT_THEM_TURNS = 5;
+
+// The interviewer's recent speech as utterances, newest first. Consecutive
+// "them" turns belong to one utterance (speech-to-text often splits a single
+// question into fragments); a "you" turn in between starts a new one.
+function recentThemUtterances(transcript) {
+  const utterances = [];
+  let current = null;
+  let themTurns = 0;
+  for (let i = transcript.length - 1; i >= 0 && themTurns < RECENT_THEM_TURNS; i--) {
+    const turn = transcript[i];
+    if (turn && turn.channel === 'them') {
+      themTurns += 1;
+      current = current === null ? String(turn.text || '') : String(turn.text || '') + ' ' + current;
+    } else if (current !== null) {
+      utterances.push(current);
+      current = null;
+    }
+  }
+  if (current !== null) utterances.push(current);
+  return utterances;
+}
+
 function detectCategory(transcript, userText) {
   // If the user typed or queued a specific question, classify it first
   if (userText && typeof userText === 'string' && userText.trim()) {
-    const cleanUserText = userText.trim();
-    for (const [category, patterns] of Object.entries(CATEGORY_PATTERNS)) {
-      if (patterns.some(re => re.test(cleanUserText))) return category;
-    }
+    const typed = classifyText(userText.trim());
+    if (typed) return typed;
   }
 
   if (!transcript || !transcript.length) return 'general';
-  // Look at the last 5 "Them" turns — the interviewer's recent questions
-  const recentThem = transcript
-    .filter(t => t.channel === 'them')
-    .slice(-5)
-    .map(t => t.text)
-    .join(' ');
-  if (!recentThem) return 'general';
-
-  for (const [category, patterns] of Object.entries(CATEGORY_PATTERNS)) {
-    if (patterns.some(re => re.test(recentThem))) return category;
+  // The newest thing the interviewer said decides. Checking the last few turns
+  // as one blob let an older "tell me about a time…" outrank the technical
+  // question that was just asked, simply because behavioral is tested first.
+  for (const utterance of recentThemUtterances(transcript)) {
+    const category = classifyText(utterance);
+    if (category) return category;
   }
   return 'general';
 }
@@ -305,12 +329,27 @@ function buildContextDocBlock(doc, limit = MAX_CONTEXT_DOC_CHARS) {
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
+// The résumé and job description are sent at one size for every question.
+// They used to shrink for technical and compensation questions, which saved a
+// few hundred tokens but changed the start of the prompt from one ask to the
+// next — and providers only reuse (cache) a prompt up to its first difference.
+const RESUME_CONTEXT_CHARS = 2600;
+const JD_CONTEXT_CHARS = 600;
+
 /**
- * buildInterviewContext(settings, mode, transcript, userText)
- * Returns a system-prompt string with only the context fields relevant to
- * the detected interview category. Returns null for leetcode mode.
+ * buildInterviewContextParts(settings, mode, transcript, userText)
+ * Returns the context for a system prompt in two pieces, or null when there is
+ * nothing to add (and always null for leetcode mode):
+ *
+ *   fixed   — meeting document, résumé, job description and the grounding
+ *             rules. Depends only on Settings, so it is byte-for-byte identical
+ *             on every ask and belongs at the very start of the prompt, where
+ *             OpenAI, Gemini and Anthropic can serve it from their prompt cache.
+ *   dynamic — the blocks chosen for the detected question category (STAR
+ *             stories, salary target, …). Changes from ask to ask, so it goes
+ *             after the instructions.
  */
-function buildInterviewContext(settings, mode, transcript, userText, precomputedCategory) {
+function buildInterviewContextParts(settings, mode, transcript, userText, precomputedCategory) {
   // Coding problems never need personal context
   if (mode === 'leetcode') return null;
 
@@ -329,28 +368,23 @@ function buildInterviewContext(settings, mode, transcript, userText, precomputed
   const hasStories = stories.trim().length > 0;
   const hasJD      = jd.trim().length > 0;
 
-  const blocks = [];
+  const fixedBlocks = [];
 
-  // Always include resume if available (prioritizes experience, scales with category)
-  if (hasResume) {
-    const resumeLimit = (category === 'behavioral' || category === 'experience')
-      ? 2600
-      : (category === 'technical' || category === 'compensation') ? 900 : 1500;
-    const rb = buildResumeBlock(resume, resumeLimit);
-    if (rb) blocks.push('=== Your Background ===\n' + rb);
-  }
-
-  // Job description — always include when available
-  if (hasJD) {
-    blocks.push(buildJDBlock(jd, category === 'technical' ? 300 : 600));
-  }
-
-  // Meeting document — always include when available, in every category.
-  // Questions during a meeting about a document can be about anything in it.
+  // Meeting document — in every category, because a question during a meeting
+  // about a document can be about anything in it. First because it is the
+  // largest block, so it is the part most worth caching.
   const docBlock = buildContextDocBlock(settings.contextDoc || '');
-  if (docBlock) blocks.push(docBlock);
+  if (docBlock) fixedBlocks.push(docBlock);
+
+  if (hasResume) {
+    const rb = buildResumeBlock(resume, RESUME_CONTEXT_CHARS);
+    if (rb) fixedBlocks.push('=== Your Background ===\n' + rb);
+  }
+
+  if (hasJD) fixedBlocks.push(buildJDBlock(jd, JD_CONTEXT_CHARS));
 
   // Category-specific injections
+  const blocks = [];
   switch (category) {
 
     case 'behavioral':
@@ -403,7 +437,7 @@ function buildInterviewContext(settings, mode, transcript, userText, precomputed
       break;
   }
 
-  if (!blocks.length) return null;
+  if (!fixedBlocks.length && !blocks.length) return null;
 
   const tailorNote = hasJD
     ? '\nTailor every answer to highlight fit with the target role above.'
@@ -412,10 +446,25 @@ function buildInterviewContext(settings, mode, transcript, userText, precomputed
   const groundingRules = (hasResume || hasStories)
     ? '\n\n=== Grounding & Source Citation Rules ===\n' +
       '• SOURCE CITATION: Whenever you answer a behavioral, experience, or background question using the candidate\'s resume or STAR stories, start the very first line with a short bracketed source tag like `[Source: <Company / Role or Project Name>]` so the candidate immediately sees which story or role to speak from.\n' +
-      '• NO-BLUFF / BRIDGE RULE: Never invent experience, tools, or metrics not present in the background above. If asked about a tool, technology, or domain not on the resume, start with `[Not on resume — bridge]` and give an honest 1-line pivot to the closest real skill or project from their background.'
+      '• NO-BLUFF / BRIDGE RULE: Never invent experience, tools, or metrics not present in the candidate\'s background. If asked about a tool, technology, or domain not on the resume, start with `[Not on resume — bridge]` and give an honest 1-line pivot to the closest real skill or project from their background.'
     : '';
 
-  return blocks.join('\n\n') + tailorNote + groundingRules;
+  return {
+    category,
+    fixed: (fixedBlocks.join('\n\n') + tailorNote + groundingRules).trim(),
+    dynamic: blocks.join('\n\n')
+  };
+}
+
+/**
+ * buildInterviewContext(settings, mode, transcript, userText)
+ * The same context as one string (fixed part, then category part). Kept for
+ * callers that do not care about prompt caching.
+ */
+function buildInterviewContext(settings, mode, transcript, userText, precomputedCategory) {
+  const parts = buildInterviewContextParts(settings, mode, transcript, userText, precomputedCategory);
+  if (!parts) return null;
+  return [parts.fixed, parts.dynamic].filter(Boolean).join('\n\n');
 }
 
 // ── Legacy compat ─────────────────────────────────────────────────────────────
@@ -439,6 +488,7 @@ function buildResumeContext(resumeText, jobDescription, mode) {
 
 module.exports = {
   buildInterviewContext,
+  buildInterviewContextParts,
   buildResumeContext,
   buildContextDocBlock,
   MAX_CONTEXT_DOC_CHARS,

@@ -4,15 +4,31 @@
 // then optionally the user's AI rules appended at the end.
 
 const { appendAiRules, appendAssistContext } = require('./profile-context');
+const { formatTurns } = require('./transcript-format');
 
+// The last `limit` turns (0 = all), with consecutive fragments from the same
+// speaker joined into one line.
 function formatTranscript(turns, limit) {
   const recent = limit ? turns.slice(-limit) : turns;
-  return recent.map((t) => (t.channel === 'them' ? 'Them: ' : 'You: ') + t.text).join('\n');
+  return formatTurns(recent);
 }
 
+// contextBlock is either one string (placed before the instructions) or the
+// { fixed, dynamic } pair from buildInterviewContextParts. With the pair, the
+// part that never changes opens the prompt and the per-question part follows
+// the instructions, so the provider's prompt cache covers the document,
+// résumé and job description on every ask, whatever the mode or category:
+//
+//   [fixed: meeting doc + résumé + JD + grounding rules]
+//   [mode instructions]
+//   [category blocks: STAR stories, salary, …]
+//   [user AI rules — appended by applyRules]
 function buildSystem(base, contextBlock) {
   if (!contextBlock) return base;
-  return contextBlock + '\n\n' + base;
+  if (typeof contextBlock === 'string') return contextBlock + '\n\n' + base;
+  const fixed = contextBlock.fixed || '';
+  const dynamic = contextBlock.dynamic || '';
+  return (fixed ? fixed + '\n\n' : '') + base + (dynamic ? '\n\n' + dynamic : '');
 }
 
 // Apply AI rules to a system prompt if the mode wants them. LeetCode returns

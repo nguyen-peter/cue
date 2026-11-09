@@ -11,6 +11,8 @@ let capturedAnthropicRequest = null;
 // default "ok" stream takes over.
 let geminiScript = [];
 let geminiCalls = 0;
+// Per-test scripted Anthropic stream events; null = the default single "ok".
+let anthropicEvents = null;
 const originalModuleLoad = Module._load;
 
 Module._load = function loadWithProviderStubs(request, parent, isMain) {
@@ -52,8 +54,9 @@ Module._load = function loadWithProviderStubs(request, parent, isMain) {
         this.messages = {
           create: async (messageRequest) => {
             capturedAnthropicRequest = messageRequest;
+            const events = anthropicEvents || [{ type: 'content_block_delta', delta: { type: 'text_delta', text: 'ok' } }];
             return (async function* () {
-              yield { type: 'content_block_delta', delta: { type: 'text_delta', text: 'ok' } };
+              for (const event of events) yield event;
             })();
           }
         };
@@ -63,7 +66,7 @@ Module._load = function loadWithProviderStubs(request, parent, isMain) {
   return originalModuleLoad.call(this, request, parent, isMain);
 };
 
-const { createLLM, formatProviderErrorMessage, isQuotaError, isOverloadedError, CURRENT_GEMINI_DEFAULT, isReasoningChatModel, tokenBudget, geminiThinkingConfig } = require('../src/llm');
+const { createLLM, formatProviderErrorMessage, isQuotaError, isOverloadedError, CURRENT_GEMINI_DEFAULT, CURRENT_GEMINI_SMART_DEFAULT, FETCH_WARMUP_TTL_MS, isReasoningChatModel, tokenBudget, geminiThinkingConfig } = require('../src/llm');
 
 test.after(() => {
   Module._load = originalModuleLoad;
@@ -87,6 +90,7 @@ test.beforeEach(() => {
   capturedAnthropicRequest = null;
   geminiScript = [];
   geminiCalls = 0;
+  anthropicEvents = null;
 });
 
 test('routes the Custom provider through the configured OpenAI-compatible endpoint', async () => {
@@ -295,11 +299,10 @@ test('createLLM: falls back to CURRENT_GEMINI_DEFAULT when no model is configure
   assert.equal(llm.ready, true);
 });
 
-test('createLLM: a fresh install (store.js DEFAULTS shape) resolves to the current default', () => {
-  const llm = createLLM(geminiSettings({
-    models: { gemini: { fast: 'gemini-2.5-flash', smart: 'gemini-2.5-flash' } }
-  }));
-  assert.equal(llm.model, CURRENT_GEMINI_DEFAULT);
+test('createLLM: a fresh install (store.js DEFAULTS shape) resolves to the current defaults', () => {
+  const models = { gemini: { fast: CURRENT_GEMINI_DEFAULT, smart: CURRENT_GEMINI_SMART_DEFAULT } };
+  assert.equal(createLLM(geminiSettings({ models })).model, CURRENT_GEMINI_DEFAULT);
+  assert.equal(createLLM(geminiSettings({ models, smart: true })).model, CURRENT_GEMINI_SMART_DEFAULT);
 });
 
 test('createLLM: self-heals a settings file saved with the retired gemini-2.0-flash default', () => {
@@ -310,11 +313,10 @@ test('createLLM: self-heals a settings file saved with the retired gemini-2.0-fl
 });
 
 test('createLLM: self-heals a legacy gemini-1.5-* model saved before the 2.0-flash migration existed', () => {
-  const llm = createLLM(geminiSettings({
-    models: { gemini: { fast: 'gemini-1.5-flash', smart: 'gemini-1.5-pro' } },
-    smart: true
-  }));
-  assert.equal(llm.model, CURRENT_GEMINI_DEFAULT);
+  const models = { gemini: { fast: 'gemini-1.5-flash', smart: 'gemini-1.5-pro' } };
+  assert.equal(createLLM(geminiSettings({ models })).model, CURRENT_GEMINI_DEFAULT);
+  // The replacement follows the tier the dead id was saved under.
+  assert.equal(createLLM(geminiSettings({ models, smart: true })).model, CURRENT_GEMINI_SMART_DEFAULT);
 });
 
 test('createLLM: leaves a user-chosen current Gemini model alone', () => {
@@ -387,10 +389,30 @@ test('GPT-5 keeps full reasoning on Smart tier and LeetCode', async () => {
   assert.equal(capturedCompletionRequest.reasoning_effort, undefined);
 });
 
+// gemini-2.5-flash-lite is the one 2.5 Flash model Google still serves without
+// a shutdown date, so it stands in for the 2.5-era thinkingBudget code path.
+const LEGACY_FLASH = { gemini: { fast: 'gemini-2.5-flash-lite', smart: 'gemini-2.5-flash-lite' } };
+
 test('Gemini fast tier disables thinking for conversational modes', async () => {
-  const llm = createLLM(geminiSettings({ smart: false }));
+  const llm = createLLM(geminiSettings({ smart: false, models: LEGACY_FLASH }));
   await llm.stream({ system: 's', turns: [{ role: 'user', text: 'hi' }], mode: 'assist', onToken: () => {} });
   assert.deepEqual(capturedGeminiRequest.config.thinkingConfig, { thinkingBudget: 0 });
+});
+
+test('the default Gemini fast model stays at its own minimal thinking level', async () => {
+  const llm = createLLM(geminiSettings({ smart: false }));
+  await llm.stream({ system: 's', turns: [{ role: 'user', text: 'hi' }], mode: 'assist', onToken: () => {} });
+  assert.equal(capturedGeminiRequest.model, CURRENT_GEMINI_DEFAULT);
+  assert.deepEqual(capturedGeminiRequest.config.thinkingConfig, { thinkingLevel: 'MINIMAL', includeThoughts: true });
+  // Never the 2.5-era numeric budget, and never a sampling parameter: Gemini 3.5+
+  // deprecates temperature/top_p/top_k and later generations reject them.
+  assert.equal(capturedGeminiRequest.config.thinkingConfig.thinkingBudget, undefined);
+  assert.equal(capturedGeminiRequest.config.temperature, undefined);
+});
+
+test('3.5 Flash-Lite on the smart tier raises thinking so Smart is not a no-op', () => {
+  assert.deepEqual(geminiThinkingConfig('gemini-3.5-flash-lite', 'ask', true), { thinkingLevel: 'HIGH', includeThoughts: true });
+  assert.deepEqual(geminiThinkingConfig('gemini-3.5-flash-lite', 'leetcode', false), { thinkingLevel: 'LOW', includeThoughts: true });
 });
 
 test('tokenBudget keeps conversational caps and enlarges LeetCode for commented walkthroughs', () => {
@@ -423,15 +445,26 @@ test('LeetCode Smart requests send the enlarged completion cap', async () => {
 });
 
 test('Gemini LeetCode uses a bounded thinking budget and the enlarged output cap', async () => {
-  const fast = createLLM(geminiSettings({ smart: false }));
+  const fast = createLLM(geminiSettings({ smart: false, models: LEGACY_FLASH }));
   await fast.stream({ system: 's', turns: [{ role: 'user', text: 'solve' }], mode: 'leetcode', onToken: () => {} });
   assert.equal(capturedGeminiRequest.config.maxOutputTokens, 4096);
   assert.deepEqual(capturedGeminiRequest.config.thinkingConfig, { thinkingBudget: 1024, includeThoughts: true });
 
-  const smart = createLLM(geminiSettings({ smart: true }));
+  const smart = createLLM(geminiSettings({ smart: true, models: LEGACY_FLASH }));
   await smart.stream({ system: 's', turns: [{ role: 'user', text: 'solve' }], mode: 'leetcode', onToken: () => {} });
   assert.equal(capturedGeminiRequest.config.maxOutputTokens, 8192);
   assert.deepEqual(capturedGeminiRequest.config.thinkingConfig, { thinkingBudget: 2048, includeThoughts: true });
+});
+
+test('LeetCode on the default Gemini models uses bounded thinking levels', async () => {
+  const fast = createLLM(geminiSettings({ smart: false }));
+  await fast.stream({ system: 's', turns: [{ role: 'user', text: 'solve' }], mode: 'leetcode', onToken: () => {} });
+  assert.deepEqual(capturedGeminiRequest.config.thinkingConfig, { thinkingLevel: 'LOW', includeThoughts: true });
+
+  const smart = createLLM(geminiSettings({ smart: true }));
+  await smart.stream({ system: 's', turns: [{ role: 'user', text: 'solve' }], mode: 'leetcode', onToken: () => {} });
+  assert.equal(capturedGeminiRequest.model, CURRENT_GEMINI_SMART_DEFAULT);
+  assert.deepEqual(capturedGeminiRequest.config.thinkingConfig, { thinkingLevel: 'MEDIUM', includeThoughts: true });
 });
 
 test('Gemini keeps full thinking depth on the smart tier', async () => {
@@ -543,6 +576,129 @@ test('Anthropic marks the reusable system prompt as cacheable', async () => {
     { type: 'text', text: 'You are cue.', cache_control: { type: 'ephemeral' } }
   ]);
   assert.equal(capturedAnthropicRequest.max_tokens, tokenBudget(undefined, false));
+});
+
+test('Anthropic gets a cache breakpoint after the part of the prompt that never changes', async () => {
+  const llm = createLLM({ provider: 'anthropic', smart: false, apiKeys: { anthropic: 'k' }, models: {} });
+  const fixed = '=== Meeting Document ===\nlong reference text';
+  const system = fixed + '\n\nYou are cue. Answer the behavioral question.';
+  await llm.stream({ system, cachePrefixChars: fixed.length, turns: [{ role: 'user', text: 'hi' }], onToken: () => {} });
+
+  const blocks = capturedAnthropicRequest.system;
+  assert.equal(blocks.length, 2);
+  assert.equal(blocks[0].text, fixed);
+  assert.deepEqual(blocks[0].cache_control, { type: 'ephemeral' });
+  assert.deepEqual(blocks[1].cache_control, { type: 'ephemeral' });
+  assert.equal(blocks[0].text + blocks[1].text, system, 'the model must receive exactly the original prompt');
+});
+
+test('a cache prefix that covers the whole prompt (or none of it) falls back to one block', async () => {
+  const llm = createLLM({ provider: 'anthropic', smart: false, apiKeys: { anthropic: 'k' }, models: {} });
+  for (const cachePrefixChars of [0, 12, 999]) {
+    await llm.stream({ system: 'You are cue.', cachePrefixChars, turns: [{ role: 'user', text: 'hi' }], onToken: () => {} });
+    assert.equal(capturedAnthropicRequest.system.length, 1);
+    assert.equal(capturedAnthropicRequest.system[0].text, 'You are cue.');
+  }
+});
+
+// ---- token usage reporting (feeds the CUE_PERF timing lines) -----------------
+
+test('Gemini reports prompt, cached and output token counts', async () => {
+  geminiScript.push(async () => (async function* () {
+    yield { text: 'par', usageMetadata: { promptTokenCount: 3310, candidatesTokenCount: 4 } };
+    yield { text: 'tial', usageMetadata: { promptTokenCount: 3310, cachedContentTokenCount: 2816, candidatesTokenCount: 212, thoughtsTokenCount: 9 } };
+  })());
+  const llm = createLLM(geminiSettings());
+  let usage = null;
+  await llm.stream({ system: 's', turns: [{ role: 'user', text: 'hi' }], mode: 'ask', onToken: () => {}, onUsage: (u) => { usage = u; } });
+  assert.deepEqual(usage, { promptTokens: 3310, cachedTokens: 2816, outputTokens: 212, thoughtTokens: 9 });
+});
+
+test('Anthropic reports cache reads as part of the prompt size', async () => {
+  anthropicEvents = [
+    { type: 'message_start', message: { usage: { input_tokens: 120, cache_read_input_tokens: 2400, cache_creation_input_tokens: 0 } } },
+    { type: 'content_block_delta', delta: { type: 'text_delta', text: 'ok' } },
+    { type: 'message_delta', usage: { output_tokens: 57 } }
+  ];
+  const llm = createLLM({ provider: 'anthropic', smart: false, apiKeys: { anthropic: 'k' }, models: {} });
+  let usage = null;
+  const text = await llm.stream({ system: 's', turns: [{ role: 'user', text: 'hi' }], onToken: () => {}, onUsage: (u) => { usage = u; } });
+  assert.equal(text, 'ok');
+  assert.deepEqual(usage, { cachedTokens: 2400, promptTokens: 2520, outputTokens: 57 });
+});
+
+function fakeOllamaResponse(lines) {
+  return { ok: true, status: 200, body: (async function* () { for (const line of lines) yield Buffer.from(line); })() };
+}
+
+async function withFakeFetch(fakeFetch, run) {
+  const originalFetch = global.fetch;
+  global.fetch = fakeFetch;
+  try { return await run(); } finally { global.fetch = originalFetch; }
+}
+
+test('Ollama requests use the configured context size and report Ollama\'s own counters', async () => {
+  const bodies = [];
+  const fakeFetch = async (_url, init) => {
+    bodies.push(JSON.parse(init.body));
+    return fakeOllamaResponse([
+      JSON.stringify({ message: { content: 'hel' } }) + '\n',
+      JSON.stringify({ message: { content: 'lo' } }) + '\n' +
+        // Final line arrives without a trailing newline.
+        JSON.stringify({ done: true, prompt_eval_count: 812, prompt_eval_duration: 1500000000, eval_count: 40, eval_duration: 2000000000, load_duration: 5000000 })
+    ]);
+  };
+  const settings = (notesContextTokens) => ({
+    provider: 'ollama', apiKeys: { ollama: 'http://127.0.0.1:59000' }, models: { ollama: { fast: 'qwen', smart: 'qwen' } }, notesContextTokens
+  });
+
+  await withFakeFetch(fakeFetch, async () => {
+    let usage = null;
+    const tokens = [];
+    const text = await createLLM(settings(8192)).stream({
+      system: 's', turns: [{ role: 'user', text: 'hi' }], maxTokens: 250, onToken: (t) => tokens.push(t), onUsage: (u) => { usage = u; }
+    });
+    assert.equal(text, 'hello');
+    assert.deepEqual(tokens, ['hel', 'lo']);
+    assert.equal(bodies[0].options.num_ctx, 8192);
+    assert.equal(bodies[0].options.num_predict, 250);
+    assert.deepEqual(usage, { promptTokens: 812, outputTokens: 40, promptEvalMs: 1500, evalMs: 2000, loadMs: 5 });
+
+    // Unset or too-small values fall back to the default rather than a window
+    // that silently truncates the notes.
+    await createLLM(settings(undefined)).stream({ system: 's', turns: [{ role: 'user', text: 'hi' }], onToken: () => {} });
+    await createLLM(settings(1024)).stream({ system: 's', turns: [{ role: 'user', text: 'hi' }], onToken: () => {} });
+    assert.equal(bodies[1].options.num_ctx, 4096);
+    assert.equal(bodies[2].options.num_ctx, 4096);
+  });
+});
+
+test('fetch-transport warmups repeat once the idle-socket window has passed', async (t) => {
+  let warmups = 0;
+  const methods = [];
+  t.mock.timers.enable({ apis: ['Date'], now: 1700000000000 });
+  const fakeFetch = async (_url, init) => {
+    warmups += 1;
+    methods.push((init && init.method) || 'GET');
+    return { arrayBuffer: async () => new ArrayBuffer(0) };
+  };
+  await withFakeFetch(fakeFetch, async () => {
+    const llm = createLLM({ provider: 'ollama', apiKeys: { ollama: 'http://127.0.0.1:59001' }, models: { ollama: { fast: 'm', smart: 'm' } } });
+    assert.equal(llm.warmAgeMs(), null);
+    llm.warmup();
+    llm.warmup();
+    assert.equal(warmups, 1, 'a second warmup inside the window is skipped');
+    assert.equal(llm.warmAgeMs(), 0);
+
+    t.mock.timers.tick(FETCH_WARMUP_TTL_MS + 1);
+    llm.warmup();
+    assert.equal(warmups, 2, 'the socket has gone idle, so it is opened again');
+    // Node's fetch closes idle sockets after about 4 seconds.
+    assert.ok(FETCH_WARMUP_TTL_MS < 4000);
+    // Never HEAD: Node's fetch closes the connection after a HEAD response,
+    // which would leave nothing warm for the real request.
+    assert.deepEqual(methods, ['GET', 'GET']);
+  });
 });
 
 test('warmup exists and is a safe no-op when configuration is incomplete', () => {

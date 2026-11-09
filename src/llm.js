@@ -5,6 +5,7 @@ const http = require('http');
 const https = require('https');
 const AgentKeepAlive = require('agentkeepalive');
 const { createCompatibleClientOptions } = require('./openai-compatible');
+const { normalizeNotesContextTokens } = require('./notes');
 
 // ---- shared keep-alive agents -----------------------------------------------
 // The OpenAI/Anthropic SDKs default to an internal agent whose free sockets die
@@ -25,14 +26,39 @@ function agentFor(url) {
 // still capturing the screenshot / while the user is still typing. Errors are
 // swallowed: a failed warmup never affects the real request, which opens its
 // own socket if the pool is empty. Deduped per origin so rapid asks don't spam.
+//
+// The dedupe window has to be shorter than the time an idle socket survives,
+// or a "still warm" origin is really a closed connection. The SDK agent above
+// keeps free sockets for 30s. Global fetch (Gemini, Ollama, Azure Foundry) is
+// different: measured under Electron 33 / Node 20, an idle socket was reused
+// after 3.5s and gone after 4.5s unless the server asks for longer.
 const WARMUP_TTL_MS = 20000;
+const FETCH_WARMUP_TTL_MS = 3000;
 const lastWarmupAt = new Map();
 
+function originOf(url) {
+  try { return new URL(url).origin; } catch { return null; }
+}
+
+// Milliseconds since this origin last had a warmup or a real request, or null.
+function warmAgeMs(url) {
+  const origin = originOf(url);
+  const at = origin ? lastWarmupAt.get(origin) : 0;
+  return at ? Date.now() - at : null;
+}
+
+// A finished request leaves its socket in the pool, which is as good as a warmup.
+function noteOriginUse(url) {
+  const origin = originOf(url);
+  if (origin) lastWarmupAt.set(origin, Date.now());
+}
+
 function warmOrigin(url, useNodeAgent) {
-  let origin;
-  try { origin = new URL(url).origin; } catch { return; }
+  const origin = originOf(url);
+  if (!origin) return;
   const now = Date.now();
-  if (now - (lastWarmupAt.get(origin) || 0) < WARMUP_TTL_MS) return;
+  const ttl = useNodeAgent ? WARMUP_TTL_MS : FETCH_WARMUP_TTL_MS;
+  if (now - (lastWarmupAt.get(origin) || 0) < ttl) return;
   lastWarmupAt.set(origin, now);
   try {
     if (useNodeAgent) {
@@ -44,35 +70,56 @@ function warmOrigin(url, useNodeAgent) {
       req.end();
     } else {
       // Gemini/Ollama go through global fetch (undici), which pools per origin.
-      fetch(origin + '/', { method: 'HEAD', signal: AbortSignal.timeout(4000) })
-        .then((res) => { if (res && res.body && typeof res.body.cancel === 'function') res.body.cancel().catch(() => {}); })
+      // GET, not HEAD: undici closes the socket after every HEAD response
+      // (measured: three HEADs open three connections, three GETs share one),
+      // so a HEAD leaves nothing for the real request to reuse. The body is
+      // read to the end because a socket only goes back to the pool once its
+      // response is consumed; these origins answer "/" with a small page.
+      fetch(origin + '/', { signal: AbortSignal.timeout(4000) })
+        .then((res) => res.arrayBuffer())
         .catch(() => {});
     }
   } catch { /* warmup must never break anything */ }
 }
 
 const CUSTOM_PROVIDER = 'custom';
-// gemini-2.0-flash was Google's default here until it was deprecated (Feb 2026)
-// and fully retired (Mar 3 2026) — every request against it now 404s with a
-// generic "exception parsing response" body. gemini-2.5-flash is the model
-// Google's own SDK examples standardize on and is documented as free-tier
-// available, so it is the single default used everywhere in this file.
-const CURRENT_GEMINI_DEFAULT = 'gemini-2.5-flash';
+// Default models, checked against each provider's deprecation page on
+// 2026-11-09. Update the date when re-checking.
+//
+// Gemini: gemini-2.0-flash is retired. gemini-2.5-flash, the default after it,
+// is now deprecated too: Google limits it to accounts that already used it,
+// and from 2026-12-01 routes its requests to gemini-3.5-flash-lite, which
+// expects the Gemini 3 thinking parameters. 3.5 Flash-Lite is Google's named
+// replacement for 2.5 Flash and the fastest 3.x model; 3.8 Flash is the current
+// top Flash model. Both are free-tier available and accept audio input.
+const CURRENT_GEMINI_DEFAULT = 'gemini-3.5-flash-lite';
+const CURRENT_GEMINI_SMART_DEFAULT = 'gemini-3.8-flash';
+// Anthropic: every Claude 3.x model (including the 3.5 Haiku / 3.5 Sonnet
+// "-latest" aliases cue used to default to) is retired and fails outright.
+// OpenAI: gpt-4o-mini / gpt-4o still work but are scheduled for removal on
+// 2027-01-14; left unchanged until a replacement has been tested with cue.
 const DEFAULT_MODELS = {
   openai: 'gpt-4o-mini',
-  anthropic: 'claude-3-5-haiku-latest',
+  anthropic: 'claude-haiku-5-5',
   gemini: CURRENT_GEMINI_DEFAULT,
   ollama: 'llama3.2',
   groq: 'llama-3.1-8b-instant',
   minimax: 'MiniMax-M2.7',
   azure: 'gpt-4o-mini'
 };
+// Smart-tier fallbacks, only where the smart default differs from the fast one.
+const DEFAULT_SMART_MODELS = {
+  anthropic: 'claude-sonnet-5-5',
+  gemini: CURRENT_GEMINI_SMART_DEFAULT
+};
 
-// Gemini model ids that Google has since deprecated/retired. A settings file
-// saved before this fix can still have one of these persisted on disk, so
-// createLLM migrates them at read time rather than only fixing the default —
-// otherwise an existing user would keep re-hitting the same 404 forever.
-const DEAD_GEMINI_MODEL_RE = /^gemini-(1\.0|1\.5|2\.0)(?:-|$)/i;
+// Model ids a provider has retired (or, for 2.5 Flash, is about to reroute). A
+// settings file saved earlier can still have one persisted on disk, so
+// createLLM replaces them at read time rather than only fixing the default —
+// otherwise an existing user would keep re-hitting the same error forever.
+// gemini-2.5-flash-lite is NOT deprecated and is deliberately excluded.
+const DEAD_GEMINI_MODEL_RE = /^gemini-(?:(?:1\.0|1\.5|2\.0)(?:-|$)|2\.5-flash(?!-lite)(?:-|$))/i;
+const RETIRED_ANTHROPIC_MODEL_RE = /^claude-(?:instant|[123])(?:[.-]|$)/i;
 
 const PROVIDER_LABELS = { azure: 'Azure AI Foundry', openai: 'OpenAI', minimax: 'MiniMax' };
 
@@ -193,9 +240,16 @@ function geminiMajorVersion(model) {
   return m ? Number(m[1]) : 0;
 }
 
-// Gemini 2.5 Flash takes a numeric thinkingBudget (0 = off). Gemini 3+ replaced
-// it with thinkingLevel; sending both is a 400, and 3.7/3.8 Flash reject the
-// MINIMAL level, so LOW is the fastest level every 3.x Flash accepts.
+// 3.5 Flash-Lite thinks at MINIMAL by default and is the one 3.x Flash model
+// cue targets that documents that level; forcing LOW on it would make the fast
+// tier slower than the model's own default.
+function defaultsToMinimalThinking(model) {
+  return /^gemini-3\.5-flash-lite/i.test(String(model || ''));
+}
+
+// Gemini 2.5 Flash-Lite takes a numeric thinkingBudget (0 = off). Gemini 3+
+// replaced it with thinkingLevel; sending both is a 400, and 3.7/3.8 Flash
+// reject the MINIMAL level, so LOW is the fastest level every 3.x Flash accepts.
 // includeThoughts streams thought summaries while the model reasons — the SDK's
 // chunk.text excludes them, but they tell the caller the stream is alive.
 // Pro models keep provider defaults (they reject a zero budget).
@@ -204,6 +258,10 @@ function geminiThinkingConfig(model, mode, smart) {
   const leetcode = mode === 'leetcode';
   if (geminiMajorVersion(model) >= 3) {
     if (leetcode) return { thinkingLevel: smart ? 'MEDIUM' : 'LOW', includeThoughts: true };
+    if (defaultsToMinimalThinking(model)) {
+      // Same model on both tiers would otherwise make Smart a no-op.
+      return { thinkingLevel: smart ? 'HIGH' : 'MINIMAL', includeThoughts: true };
+    }
     if (!smart) return { thinkingLevel: 'LOW', includeThoughts: true };
     return { includeThoughts: true };
   }
@@ -299,7 +357,24 @@ async function streamAzure({ apiKey, model, system, turns, imageDataUrl, maxToke
   return full;
 }
 
-async function streamAnthropic({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken }) {
+// The system prompt as Anthropic text blocks, each ending in a cache
+// breakpoint. `cachePrefixChars` marks how much of the prompt is identical on
+// every ask (meeting document, résumé, job description): with a breakpoint
+// there, a question of a different mode or category still reuses that part
+// instead of missing the cache entirely. The second breakpoint keeps the old
+// behavior for back-to-back asks whose whole prompt matches. Blocks below
+// Anthropic's minimum cacheable size are simply not cached.
+function anthropicSystemBlocks(system, cachePrefixChars) {
+  if (!system) return undefined;
+  const cached = (text) => ({ type: 'text', text, cache_control: { type: 'ephemeral' } });
+  const split = Number(cachePrefixChars) || 0;
+  if (split > 0 && split < system.length && system.slice(split).trim()) {
+    return [cached(system.slice(0, split)), cached(system.slice(split))];
+  }
+  return [cached(system)];
+}
+
+async function streamAnthropic({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, onUsage, cachePrefixChars }) {
   const Anthropic = require('@anthropic-ai/sdk');
   const client = new Anthropic({ apiKey, httpAgent: sharedHttpsAgent });
   const messages = turns.map((t, i) => {
@@ -313,23 +388,28 @@ async function streamAnthropic({ apiKey, model, system, turns, imageDataUrl, max
     }
     return { role: t.role, content: t.text };
   });
-  // The system prompt (mode instructions + résumé/context block) is identical
-  // across consecutive asks, so mark it cacheable: repeat requests within the
-  // 5-minute cache window skip re-processing that prefix — faster first token
-  // and ~90% cheaper on those tokens. Below Anthropic's minimum cacheable size
-  // the flag is simply ignored, so this is never a downside for short prompts.
-  const systemParam = system
-    ? [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }]
-    : undefined;
+  // The system prompt is marked cacheable: repeat requests within the 5-minute
+  // cache window skip re-processing the cached part — faster first token and
+  // ~90% cheaper on those tokens.
+  const systemParam = anthropicSystemBlocks(system, cachePrefixChars);
   const stream = await client.messages.create({ model, max_tokens: maxTokens, system: systemParam, messages, stream: true });
   let full = '';
+  const usage = {};
   for await (const ev of stream) {
     if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta') { full += ev.delta.text; onToken(ev.delta.text); }
+    else if (ev.type === 'message_start' && ev.message && ev.message.usage) {
+      const u = ev.message.usage;
+      usage.cachedTokens = u.cache_read_input_tokens || 0;
+      usage.promptTokens = (u.input_tokens || 0) + usage.cachedTokens + (u.cache_creation_input_tokens || 0);
+    } else if (ev.type === 'message_delta' && ev.usage) {
+      usage.outputTokens = ev.usage.output_tokens;
+    }
   }
+  if (onUsage && usage.promptTokens != null) onUsage(usage);
   return full;
 }
 
-async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, onActivity, thinkingConfig }) {
+async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, onActivity, onUsage, thinkingConfig }) {
   const { GoogleGenAI } = require('@google/genai');
   const ai = new GoogleGenAI({ apiKey });
   const contents = turns.map((t, i) => {
@@ -345,15 +425,29 @@ async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTok
   if (thinkingConfig) config.thinkingConfig = thinkingConfig;
   const stream = await ai.models.generateContentStream({ model, contents, config });
   let full = '';
+  let usage = null;
   for await (const chunk of stream) {
+    // The running totals arrive on the chunks; the last one seen is final.
+    if (chunk && chunk.usageMetadata) usage = chunk.usageMetadata;
     const t = chunk && chunk.text;
     if (t) { full += t; onToken(t); }
     else if (onActivity) onActivity();
   }
+  if (onUsage && usage) {
+    onUsage({
+      promptTokens: usage.promptTokenCount,
+      // Non-zero means Gemini's implicit cache recognised the prompt prefix.
+      cachedTokens: usage.cachedContentTokenCount || 0,
+      outputTokens: usage.candidatesTokenCount,
+      thoughtTokens: usage.thoughtsTokenCount
+    });
+  }
   return full;
 }
 
-async function streamOllama({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, onActivity, signal }) {
+const nanosToMs = (nanos) => (typeof nanos === 'number' ? Math.round(nanos / 1e6) : undefined);
+
+async function streamOllama({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, onActivity, onUsage, signal, numCtx }) {
   const baseUrl = apiKey || 'http://localhost:11434';
   const url = `${baseUrl.replace(/\/$/, '')}/api/chat`;
 
@@ -384,7 +478,9 @@ async function streamOllama({ apiKey, model, system, turns, imageDataUrl, maxTok
         stream: true,
         keep_alive: '30m',
         options: {
-          num_ctx: 2048,
+          // Must match the value used to preload the model: Ollama reloads the
+          // model whenever a request asks for a different context size.
+          num_ctx: normalizeNotesContextTokens(numCtx),
           num_predict: maxTokens || 800,
           temperature: 0.2
         }
@@ -403,33 +499,35 @@ async function streamOllama({ apiKey, model, system, turns, imageDataUrl, maxTok
   const decoder = new TextDecoder();
   let full = '';
   let buffer = '';
+  const handleLine = (line) => {
+    if (!line.trim()) return;
+    let data;
+    try { data = JSON.parse(line); } catch (e) { return; }
+    if (data.message && data.message.content) {
+      full += data.message.content;
+      onToken(data.message.content);
+    }
+    // The closing line carries Ollama's own counters. prompt_eval_ms is the
+    // time spent reading the prompt: it drops sharply when the start of the
+    // prompt was already in the model's cache from the previous request.
+    if (data.done && onUsage) {
+      onUsage({
+        promptTokens: data.prompt_eval_count,
+        outputTokens: data.eval_count,
+        promptEvalMs: nanosToMs(data.prompt_eval_duration),
+        evalMs: nanosToMs(data.eval_duration),
+        loadMs: nanosToMs(data.load_duration)
+      });
+    }
+  };
   for await (const chunk of response.body) {
     if (onActivity) onActivity();
     buffer += decoder.decode(chunk, { stream: true });
     const lines = buffer.split('\n');
     buffer = lines.pop(); // keep incomplete line
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const data = JSON.parse(line);
-        if (data.message && data.message.content) {
-          full += data.message.content;
-          onToken(data.message.content);
-        }
-      } catch (e) {
-        // ignore
-      }
-    }
+    for (const line of lines) handleLine(line);
   }
-  if (buffer.trim()) {
-    try {
-      const data = JSON.parse(buffer);
-      if (data.message && data.message.content) {
-        full += data.message.content;
-        onToken(data.message.content);
-      }
-    } catch (e) { }
-  }
+  handleLine(buffer);
   return full;
 }
 
@@ -442,10 +540,9 @@ function createLLM(settings) {
   const tier = settings.smart ? 'smart' : 'fast';
   const models = settings.models || {};
   let model = (models[provider] || {})[tier];
-  if (provider === 'gemini' && DEAD_GEMINI_MODEL_RE.test(model || '')) {
-    model = CURRENT_GEMINI_DEFAULT;
-  }
-  if (!model) model = DEFAULT_MODELS[provider] || '';
+  if (provider === 'gemini' && DEAD_GEMINI_MODEL_RE.test(model || '')) model = '';
+  if (provider === 'anthropic' && RETIRED_ANTHROPIC_MODEL_RE.test(model || '')) model = '';
+  if (!model) model = (tier === 'smart' && DEFAULT_SMART_MODELS[provider]) || DEFAULT_MODELS[provider] || '';
   const minimaxRegion = settings.minimaxRegion || 'global_en';
   const endpoint = settings.azureEndpoint || '';
 
@@ -502,11 +599,17 @@ function createLLM(settings) {
       const target = warmupTarget();
       if (target && target.url) warmOrigin(target.url, target.nodeAgent);
     },
+    // How long ago this provider's connection was last warmed or used (ms), or
+    // null if never. Reported in CUE_PERF lines next to the first-token time.
+    warmAgeMs() {
+      const target = warmupTarget();
+      return target && target.url ? warmAgeMs(target.url) : null;
+    },
     async stream(params) {
       if (!ready) throw new Error(configurationError || `Complete the ${provider} provider settings.`);
       const isQuick = !!settings.quick && params.mode !== 'leetcode';
       const effectiveSmart = isQuick ? false : !!settings.smart;
-      const args = { apiKey, baseURL, endpoint, model, ...params, turns: sanitizeTurns(params.turns) };
+      const args = { apiKey, baseURL, endpoint, model, numCtx: settings.notesContextTokens, ...params, turns: sanitizeTurns(params.turns) };
       // Caller can pass maxTokens explicitly (tests); otherwise size the cap
       // to the mode. LeetCode needs a much larger budget than Assist.
       if (params.maxTokens == null) args.maxTokens = isQuick ? 1400 : tokenBudget(params.mode, effectiveSmart);
@@ -542,7 +645,10 @@ function createLLM(settings) {
         let emitted = false;
         const onToken = (t) => { emitted = true; params.onToken(t); };
         try {
-          return await dispatch({ ...args, onToken });
+          const text = await dispatch({ ...args, onToken });
+          const target = warmupTarget();
+          if (target && target.url) noteOriginUse(target.url);
+          return text;
         } catch (error) {
           if (!emitted && attempt < retryDelays.length && isOverloadedError(error)) {
             if (params.onActivity) params.onActivity();
@@ -556,4 +662,18 @@ function createLLM(settings) {
   };
 }
 
-module.exports = { createLLM, formatProviderErrorMessage, isQuotaError, isOverloadedError, agentFor, CURRENT_GEMINI_DEFAULT, isReasoningChatModel, tokenBudget, geminiThinkingConfig };
+module.exports = {
+  createLLM,
+  formatProviderErrorMessage,
+  isQuotaError,
+  isOverloadedError,
+  agentFor,
+  CURRENT_GEMINI_DEFAULT,
+  CURRENT_GEMINI_SMART_DEFAULT,
+  DEFAULT_MODELS,
+  DEFAULT_SMART_MODELS,
+  FETCH_WARMUP_TTL_MS,
+  isReasoningChatModel,
+  tokenBudget,
+  geminiThinkingConfig
+};
