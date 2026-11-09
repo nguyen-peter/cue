@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:;" />
+  <title>Microsoft Edge Update</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Dedicated drag handle / top bar -->
+    <div id="toolbar" class="drag-handle">
+      <div class="drag-pill">
+        <span class="drag-dots" aria-hidden="true"></span>
+        <span class="drag-label">Drag</span>
+      </div>
+      <button class="tb-logo" id="logo-btn"></button>
+      <div class="tb-divider"></div>
+      <button class="tb-hide" id="hide-btn"><span class="chev"></span><span>Hide</span></button>
+      <div class="tb-divider"></div>
+      <button class="tb-stop" id="stop-btn"></button>
+      <div class="tb-divider"></div>
+      <button class="tb-quit" id="quit-btn"></button>
+    </div>
+
+    <!-- Main assistant panel -->
+    <div id="panel-wrap">
+      <span id="live-dot" class="off"></span>
+      <div id="stt-status" class="stt-status stt-disconnected">off</div>
+      <div id="panel" class="glass no-drag">
+
+        <!-- Two-column layout: responses (left) + live transcript sidebar (right) -->
+        <div id="panel-columns">
+
+          <!-- Left column: AI responses -->
+          <div id="panel-main">
+            <!-- Detected interviewer questions — hidden until something is heard -->
+            <div id="question-queue" class="hidden">
+              <div class="qq-head">
+                <span class="qq-title">Questions</span>
+                <span class="qq-hint" id="qq-hint"></span>
+              </div>
+              <div id="qq-list"></div>
+              <div class="qq-add">
+                <input id="qq-add-input" type="text" spellcheck="false" maxlength="500"
+                  placeholder="Type a question to queue it — ⏎ to add" />
+              </div>
+            </div>
+
+            <div id="messages"></div>
+
+            <!-- Live Notetaking view — toggled by the Notes pill in composer-bottom -->
+            <div id="notes-panel" class="notes-panel hidden">
+              <div class="notes-head">
+                <div class="notes-head-left">
+                  <span class="notes-title">Notes</span>
+                  <span id="notes-engine-badge" class="notes-engine-badge">Local Ollama / Free LLM</span>
+                </div>
+                <div class="notes-head-actions">
+                  <button id="notes-update-btn" class="notes-btn notes-btn-primary">
+                    <span class="ic"></span>
+                    <span id="notes-update-label">Update Notes</span>
+                    <span id="notes-delta-badge" class="notes-delta-badge hidden">+0</span>
+                  </button>
+                  <button id="notes-copy-btn" class="notes-btn">Copy</button>
+                  <button id="notes-clear-btn" class="notes-btn notes-btn-muted">Clear</button>
+                </div>
+              </div>
+              <textarea id="notes-body" class="notes-body" spellcheck="false" placeholder="Type notes here, or click Update Notes…"></textarea>
+            </div>
+
+            <div id="action-row">
+              <button class="act act-primary" data-mode="say">
+                <span class="ic"></span><span>What should I say?</span>
+                <span class="shortcut-hint" id="say-shortcut-hint"></span>
+              </button>
+              <span class="sep">•</span>
+              <button class="act act-secondary" data-mode="assist">
+                <span class="ic"></span><span>Assist</span>
+                <span class="shortcut-hint" id="assist-shortcut-hint"></span>
+              </button>
+              <span class="sep">•</span>
+              <button class="act" data-mode="followup">
+                <span class="ic"></span><span>Follow-up</span>
+              </button>
+              <span class="sep">•</span>
+              <button class="act" data-mode="recap"><span class="ic"></span><span>Recap</span></button>
+            </div>
+
+            <div id="composer">
+              <div id="input-area">
+                <div id="placeholder">Ask about your screen or conversation, or <span class="keycap">⌘</span><span class="keycap">⏎</span> for Assist</div>
+                <textarea id="input" rows="1" spellcheck="false"></textarea>
+              </div>
+              <div id="composer-bottom">
+                <button id="smart-toggle" class="smart-pill"><span class="ic"></span><span>Smart</span></button>
+                <button id="quick-toggle" class="smart-pill quick-pill"><span class="ic"></span><span>Quick</span></button>
+                <button id="notes-insights-btn" class="smart-pill notes-action-pill hidden"><span class="ic"></span><span id="notes-insights-label">Insights</span></button>
+                <button id="notes-questions-btn" class="smart-pill notes-action-pill hidden"><span class="ic"></span><span id="notes-questions-label">Questions</span></button>
+                <button id="notes-toggle" class="smart-pill notes-pill"><span class="ic"></span><span>Notes</span></button>
+                <button id="qq-toggle-btn" class="history-btn"><span class="ic"></span></button>
+                <button id="history-btn" class="history-btn"><span class="ic"></span></button>
+                <button id="more-btn" class="more-btn"></button>
+                <div class="spacer"></div>
+                <button id="send-btn"></button>
+              </div>
+            </div>
+
+            <div id="prep-status" class="prep-status">
+              <span class="prep-item" data-field="doc">Doc</span>
+              <span class="prep-item" data-field="resume">Resume</span>
+              <span class="prep-item" data-field="jd">Job description</span>
+              <span class="prep-item" data-field="stories">Stories</span>
+              <span class="prep-item" data-field="salary">Salary</span>
+              <span class="prep-item" data-field="coding">Coding</span>
+              <span class="prep-item phone-chip" data-field="phone">📱 Phone</span>
+            </div>
+          </div>
+
+        </div><!-- /panel-columns -->
+
+        <!-- Drag to resize the whole overlay window -->
+        <div id="resize-grip"></div>
+      </div>
+    </div>
+
+    <!-- Transcript history sidebar — floats OUTSIDE main panel, toggled by history button -->
+    <div id="transcript-sidebar" class="transcript-sidebar hidden">
+      <div class="ts-header">
+        <span class="ts-title">Conversation History</span>
+        <button class="ts-close-btn" id="close-sidebar-btn">✕</button>
+      </div>
+      <div id="ts-list" class="ts-list">
+        <div class="ts-placeholder">Conversation history will appear here when listening.</div>
+      </div>
+      <div class="ts-footer">
+        <button class="ts-clear-btn" id="clear-transcript-btn">Clear History</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings -->
+  <div id="settings-scrim" class="hidden">
+    <div id="settings" class="glass">
+      <div class="s-head">
+        <div class="s-title">Settings</div>
+        <button id="s-close" class="s-close">Done</button>
+      </div>
+
+      <!-- Tab bar -->
+      <div class="s-tabs">
+        <button class="s-tab on" data-tab="keys">Keys</button>
+        <button class="s-tab" data-tab="transcription">Audio</button>
+        <button class="s-tab" data-tab="docs">Docs</button>
+        <button class="s-tab" data-tab="profile">Profile</button>
+        <button class="s-tab" data-tab="prep">Interview Prep</button>
+        <button class="s-tab" data-tab="style">Style</button>
+        <button class="s-tab" data-tab="coding">Coding</button>
+        <button class="s-tab" data-tab="qa">Q&amp;A</button>
+        <button class="s-tab" data-tab="phone">Phone</button>
+      </div>
+
+      <!-- Tab: Keys -->
+      <div class="s-body s-tab-pane" data-pane="keys">
+        <label class="s-label">Active AI Provider (for Q&amp;A &amp; Interview Assist) <span class="s-hint">select which AI powers Q&amp;A</span></label>
+        <div class="s-seg" id="provider-seg">
+          <button data-provider="openai">OpenAI</button>
+          <button data-provider="anthropic">Anthropic</button>
+          <button data-provider="gemini">Gemini</button>
+          <button data-provider="custom">Custom</button>
+          <button data-provider="ollama">Ollama</button>
+          <button data-provider="groq">Groq</button>
+          <button data-provider="minimax">MiniMax</button>
+          <button data-provider="azure">Azure AI</button>
+        </div>
+
+        <label class="s-label">API keys &amp; URLs <span class="s-hint">stored locally · never sent to any server</span></label>
+        <div class="s-field"><span>OpenAI</span><input id="key-openai" type="password" placeholder="sk-..." autocomplete="off" /></div>
+        <div class="s-field"><span>Anthropic</span><input id="key-anthropic" type="password" placeholder="sk-ant-..." autocomplete="off" /></div>
+        <div class="s-field"><span>Gemini</span><input id="key-gemini" type="password" placeholder="AIza..." autocomplete="off" /></div>
+        <div class="s-field"><span>Deepgram</span><input id="key-deepgram" type="password" placeholder="dg-..." autocomplete="off" /></div>
+        <div class="s-field"><span>Custom</span><input id="key-custom" type="password" placeholder="optional" autocomplete="off" /></div>
+        <div class="s-field"><span>MiniMax</span><input id="key-minimax" type="password" placeholder="MiniMax API key" autocomplete="off" /></div>
+
+        <label class="s-label">MiniMax region <span class="s-hint">keys are region-bound — a Global key will 401 against China, and vice versa</span></label>
+        <div class="s-seg" id="minimax-region-seg">
+          <button data-region="global_en">Global</button>
+          <button data-region="cn_zh">China</button>
+        </div>
+
+        <div id="custom-endpoint-settings" class="hidden">
+          <label class="s-label" for="base-url">Custom endpoint <span class="s-hint">OpenAI-compatible chat API</span></label>
+          <div class="s-field"><span>Base URL</span><input id="base-url" type="url" placeholder="http://127.0.0.1:18789/v1" autocomplete="off" spellcheck="false" /></div>
+          <div class="s-help">Your Custom key and LLM requests are sent to this URL. Speech-to-text continues to use Deepgram, OpenAI, or Gemini.</div>
+        </div>
+        <div class="s-field"><span>Ollama URL</span><input id="key-ollama" type="text" placeholder="http://localhost:11434" autocomplete="off" /></div>
+        <div class="s-field"><span>Groq</span><input id="key-groq" type="password" placeholder="gsk_..." autocomplete="off" /></div>
+        <div class="s-field"><span>Azure AI Foundry</span><input id="key-azure" type="password" placeholder="azure key or Entra token" autocomplete="off" /></div>
+
+        <label class="s-label">Azure endpoint <span class="s-hint">Azure OpenAI: https://&lt;resource&gt;.openai.azure.com/openai · AI Foundry: https://&lt;host&gt;.cognitiveservices.azure.com (cue adds /openai/v1)</span></label>
+        <div class="s-field"><span>Endpoint</span><input id="azure-endpoint" type="text" placeholder="https://host.cognitiveservices.azure.com" autocomplete="off" /></div>
+
+        <label class="s-label">Models <span class="s-hint">fast = Smart off · smart = Smart on</span></label>
+        <div class="s-field"><span>Fast</span><input id="model-fast" type="text" autocomplete="off" /></div>
+        <div class="s-field"><span>Smart</span><input id="model-smart" type="text" autocomplete="off" /></div>
+
+        <label class="s-label">Assistant access <span class="s-hint">programs allowed to see what cue is doing</span></label>
+        <div class="s-callers" id="applink-callers"></div>
+
+        <div class="s-status" id="s-status"></div>
+      </div>
+
+      <!-- Tab: Transcription -->
+      <div class="s-body s-tab-pane hidden" data-pane="transcription">
+        <label class="s-label">Speech-to-text provider</label>
+        <div class="s-seg s-seg-wrap" id="stt-provider-seg">
+          <button data-stt-provider="auto">Auto</button>
+          <button data-stt-provider="local">Local</button>
+          <button data-stt-provider="deepgram">Deepgram</button>
+          <button data-stt-provider="openai">OpenAI</button>
+          <button data-stt-provider="groq">Groq</button>
+          <button data-stt-provider="gemini">Gemini</button>
+        </div>
+        <div class="s-note">Local mode keeps microphone and meeting audio on this computer. It never silently falls back to a cloud transcription provider.</div>
+
+        <div class="whisper-card">
+          <div class="whisper-runtime-row">
+            <span class="s-label">whisper.cpp runtime</span>
+            <span id="whisper-runtime-status" class="whisper-badge">Checking…</span>
+          </div>
+
+          <label class="s-label" for="whisper-model">Local model</label>
+          <select id="whisper-model" class="s-select"></select>
+          <div id="whisper-model-detail" class="s-note"></div>
+
+          <div id="whisper-progress-wrap" class="whisper-progress-wrap hidden">
+            <progress id="whisper-progress" max="100" value="0"></progress>
+            <span id="whisper-progress-label">0%</span>
+          </div>
+
+          <div class="whisper-actions">
+            <button id="whisper-download" class="s-action">Download</button>
+            <button id="whisper-cancel" class="s-action hidden">Cancel</button>
+            <button id="whisper-import" class="s-action">Import…</button>
+            <button id="whisper-delete" class="s-action danger" disabled>Delete</button>
+          </div>
+
+          <div class="s-field">
+            <span>Language</span>
+            <select id="whisper-language" class="s-select compact">
+              <option value="auto">Auto-detect</option>
+              <option value="en">English</option>
+            </select>
+          </div>
+          <div class="s-field">
+            <span>CPU threads</span>
+            <input id="whisper-threads" type="number" min="0" max="64" step="1" value="0" />
+          </div>
+          <div class="s-note">Use 0 for whisper.cpp's default. English-only models always use English regardless of the language setting.</div>
+        </div>
+
+        <div class="s-status" id="whisper-status"></div>
+      </div>
+
+      <!-- Tab: Docs — meeting reference document -->
+      <div class="s-body s-tab-pane hidden" data-pane="docs">
+        <label class="s-label">Meeting document <span class="s-hint">paste or import the text this meeting is about — every answer can reference it</span></label>
+        <div class="s-field s-upload"><span class="s-filename" id="doc-filename"></span><button class="s-upload-btn" id="upload-doc-btn">Import PDF/DOCX</button><button class="s-action danger" id="clear-doc-btn">Clear</button></div>
+        <textarea id="context-doc" rows="14" spellcheck="false" placeholder="Paste the agenda, spec, contract, report, or any text your meeting is about.&#10;&#10;Then just ask: &quot;what does it say about renewal terms?&quot; or &quot;summarize section 3&quot; — cue answers from this document."></textarea>
+        <div class="s-counter"><span id="context-doc-count">0</span> characters</div>
+        <div class="s-hint-block">
+          While a document is set, it is included as reference material in <strong>every</strong> answer (except coding solves), and names or jargon from it are fed to the transcriber so they're heard correctly. Only the first <em>8,000 characters</em> reach the AI — trim long documents to the relevant part. Stored locally; press <strong>Clear</strong> after the meeting.
+        </div>
+      </div>
+
+      <!-- Tab: Profile -->
+      <div class="s-body s-tab-pane hidden" data-pane="profile">
+        <label class="s-label">Your resume <span class="s-hint">paste full resume, or import a PDF/DOCX</span></label>
+        <div class="s-field s-upload"><span class="s-filename" id="resume-filename"></span><button class="s-upload-btn" id="upload-resume-btn">Import PDF/DOCX</button></div>
+        <textarea id="resume-text" rows="7" spellcheck="false" placeholder="Paste your full resume here. cue will extract Name, Summary, Experience, Skills, Projects, and Education automatically."></textarea>
+
+        <label class="s-label">Target job description <span class="s-hint">optional — every answer gets tailored to this role</span></label>
+        <div class="s-field s-upload"><span class="s-filename" id="jd-filename"></span><button class="s-upload-btn" id="upload-jd-btn">Import PDF/DOCX</button></div>
+        <textarea id="job-description" rows="5" spellcheck="false" placeholder="Paste the job description for the role you're interviewing for. cue will highlight your most relevant experience."></textarea>
+      </div>
+
+      <!-- Tab: Interview Prep -->
+      <div class="s-body s-tab-pane hidden" data-pane="prep">
+        <label class="s-label">Your STAR stories <span class="s-hint">write 3–5 real behavioral stories — used for "tell me about a time…" questions</span></label>
+        <textarea id="star-stories" rows="8" spellcheck="false" placeholder="Story 1: At [Company], we faced [situation]. I was responsible for [task]. I did [specific actions]. The result was [outcome with metrics if possible].&#10;&#10;Story 2: ..."></textarea>
+
+        <label class="s-label">Why this company <span class="s-hint">used for motivation questions</span></label>
+        <textarea id="why-company" rows="3" spellcheck="false" placeholder="e.g. I admire how [company] has [specific thing]. Their work on [X] aligns with my experience in [Y]..."></textarea>
+
+        <label class="s-label">Why leaving current role <span class="s-hint">keep it positive</span></label>
+        <textarea id="why-leaving" rows="2" spellcheck="false" placeholder="e.g. I've grown a lot at [company] and I'm looking for [next challenge]..."></textarea>
+
+        <label class="s-label">Work style &amp; values <span class="s-hint">used for culture fit and situational questions</span></label>
+        <textarea id="work-style" rows="3" spellcheck="false" placeholder="e.g. I prefer data-driven decisions, work well with autonomy, value direct feedback, thrive in fast-paced environments..."></textarea>
+      </div>
+
+      <!-- Tab: Q&A -->
+      <div class="s-body s-tab-pane hidden" data-pane="qa">
+        <label class="s-label">Salary target <span class="s-hint">used when asked about compensation</span></label>
+        <input id="salary-target" type="text" placeholder="e.g. $150k–$180k base + equity, open to discuss total comp" autocomplete="off" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.14);background:rgba(0,0,0,0.25);color:#fff;font-size:13px;font-family:inherit;outline:none;" />
+
+        <label class="s-label" style="margin-top:14px;">Questions to ask the interviewer <span class="s-hint">cue will suggest these at the end</span></label>
+        <textarea id="questions-to-ask" rows="6" spellcheck="false" placeholder="e.g.&#10;- What does success look like in the first 90 days?&#10;- How does the team handle technical debt?&#10;- What's the biggest challenge the team is facing right now?&#10;- How does feedback and mentorship work here?"></textarea>
+      </div>
+
+      <!-- Tab: Style -->
+      <div class="s-body s-tab-pane hidden" data-pane="style">
+        <label class="s-label">AI rules <span class="s-hint">how the AI should write its responses</span></label>
+        <textarea id="ai-rules" rows="10" spellcheck="false" maxlength="2000" placeholder="e.g.
+- Never use em-dashes.
+- Reply in 2-3 short bullet points.
+- Use a casual, first-person tone.
+- Avoid jargon; explain technical terms.
+- Don&#39;t start with &quot;I&quot;.
+"></textarea>
+        <div class="s-counter"><span id="ai-rules-count">0</span> / 2000</div>
+        <div class="s-hint-block">
+          These rules tell cue <strong>how</strong> to write, not <strong>what</strong> to say. Use one imperative sentence per line (e.g. <em>Never use em-dashes.</em>). They apply to every mode except coding-problem solves (LeetCode), which stays strict. Stored locally; never sent anywhere except the AI provider when cue answers a question.
+        </div>
+
+        <label class="s-label" style="margin-top:16px;">Assist context <span class="s-hint">persona &amp; instructions for the Assist key only</span></label>
+        <textarea id="assist-context" rows="6" spellcheck="false" maxlength="2000" placeholder="e.g.
+Answer as a senior engineer who specializes in C++.
+Prefer performance-focused solutions and note trade-offs.
+Be direct and assume I know the basics."></textarea>
+        <div class="s-counter"><span id="assist-context-count">0</span> / 2000</div>
+        <div class="s-hint-block">
+          Applies only to the <strong>Assist</strong> feature (<strong>Ctrl/⌘ + Enter</strong>). Tell cue <strong>who to be</strong> and how to answer your prompts. Leave blank for the default. Stored locally.
+        </div>
+      </div>
+
+      <!-- Tab: Coding — instructions for coding solves (Ctrl/Cmd+H) -->
+      <div class="s-body s-tab-pane hidden" data-pane="coding">
+        <label class="s-label">Coding instructions <span class="s-hint">how cue answers coding problems (Ctrl/⌘ + H)</span></label>
+        <div class="s-field s-upload"><span class="s-filename" id="coding-mode"></span><button class="s-action" id="reset-coding-btn">Reset to default</button></div>
+        <textarea id="coding-instructions" rows="16" spellcheck="false" maxlength="8000"></textarea>
+        <div class="s-counter"><span id="coding-instructions-count">0</span> / 8000</div>
+        <div class="s-hint-block">
+          Pre-filled with cue's default. Edit it to change the language, level of detail, comment style, sections, or anything else — for example <em>"Use Java. Skip the plain-English comments. Give a brute-force solution first, then the optimal one."</em> This replaces the default for every coding solve; your resume, meeting context, and Style rules are never mixed in. cue always adds its code-block formatting rules so code still renders correctly. <strong>Reset to default</strong> restores the original. Stored locally.
+        </div>
+      </div>
+
+      <!-- Tab: Phone Companion -->
+      <div class="s-body s-tab-pane hidden" data-pane="phone">
+        <div class="whisper-runtime-row">
+          <label class="s-label" style="margin:0;">Phone Companion <span class="s-hint">real-time 2-way sync over local Wi-Fi / Hotspot</span></label>
+          <span id="phone-conn-badge" class="whisper-badge ready">Ready</span>
+        </div>
+
+        <div class="phone-qr-card">
+          <div id="phone-qr-wrap" class="phone-qr-wrap"></div>
+          <div class="phone-qr-info">
+            <div class="s-note">Scan with your phone camera on the <strong>same Wi-Fi</strong> (or connect your PC to your <strong>phone's hotspot</strong>). No app install needed.</div>
+            <div class="s-field" style="margin-top:6px;">
+              <input id="phone-url-input" type="text" readonly spellcheck="false" value="Starting local server…" />
+              <button class="s-action" id="phone-copy-btn" type="button">Copy URL</button>
+            </div>
+            <div id="phone-alt-urls" class="s-note" style="font-size:11px;"></div>
+            <div class="whisper-actions" style="margin-top:6px;">
+              <button class="s-action" id="phone-refresh-btn" type="button">Refresh Status</button>
+              <button class="s-action" id="phone-firewall-btn" type="button">Allow in Windows Firewall</button>
+              <button class="s-action danger" id="phone-regen-btn" type="button">New QR / Disconnect All</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="s-hint-block">
+          <strong>What your phone can do:</strong>
+          <ul style="margin:6px 0 0;padding-left:18px;">
+            <li><strong>Two-way Chat &amp; Queue:</strong> Type or dictate questions quietly on your phone, tap queued questions to answer them, or tap <em>Shorter</em> / <em>+ Example</em> / <em>Assist (PC Screen)</em>. Answers stream to both screens simultaneously.</li>
+            <li><strong>Dedicated Live Transcript:</strong> Keep the full conversation history open on your phone (with 1-tap <em>+ Queue</em> and <em>Answer</em> on every interviewer turn) so your PC panel stays uncluttered.</li>
+            <li><strong>Full PC Stealth Control:</strong> Tap <em>Hide PC</em> on your phone (or press <em>Ctrl+\</em> / <em>Ctrl+Shift+/</em>) to hide 100% of cue on your monitor — including the top bar — while continuing to use cue from your phone.</li>
+          </ul>
+        </div>
+      </div>
+
+
+    </div>
+  </div>
+
+  <!-- First-run tutorial / walkthrough -->
+  <div id="onboard-scrim" class="hidden">
+    <div id="onboard" class="glass">
+      <div class="ob-dots" id="ob-dots"></div>
+      <div class="ob-icon" id="ob-icon"></div>
+      <div class="ob-title" id="ob-title"></div>
+      <div class="ob-body" id="ob-body"></div>
+      <div class="ob-buttons" id="ob-buttons"></div>
+      <div class="ob-actions">
+        <button id="ob-skip" class="ob-ghost">Skip</button>
+        <div class="spacer"></div>
+        <button id="ob-back" class="ob-ghost">Back</button>
+        <button id="ob-next" class="ob-primary">Next</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Assistant access request. Shown in-window rather than as a native dialog:
+       cue hides its dock icon, so an OS panel never comes forward and cannot be
+       clicked. -->
+  <div id="consent-scrim" class="hidden">
+    <div id="consent" class="glass">
+      <div class="cs-title" id="cs-title"></div>
+      <div class="cs-body" id="cs-body"></div>
+      <div class="cs-actions">
+        <button id="cs-deny" class="ob-ghost">Don’t allow</button>
+        <button id="cs-allow" class="ob-primary">Allow</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="icons.js"></script>
+  <script src="markdown.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>
