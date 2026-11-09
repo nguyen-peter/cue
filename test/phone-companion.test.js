@@ -64,7 +64,7 @@ test('phone companion server enforces token auth and syncs 2-way over WebSocket'
     const authRes = await fetch(`http://127.0.0.1:${info.port}/?t=${info.token}`);
     assert.equal(authRes.status, 200);
     const html = await authRes.text();
-    assert.match(html, /cue phone/i);
+    assert.match(html, /<title>cue companion<\/title>/i);
 
     // 3. Connect WebSocket with valid token, receive 'init' snapshot, send action, receive broadcast
     const ws = new WebSocket(`ws://127.0.0.1:${info.port}/ws?t=${info.token}`);

@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { renderMarkdown } = require('../renderer/markdown');
+const { renderMarkdown, renderMarkdownParts } = require('../renderer/markdown');
 
 test('a mid-line ```lang opener still becomes a <pre> code block', () => {
   const html = renderMarkdown('(3) ```cpp\nint x = 1;\n```\n(4) Time complexity: fast.');
@@ -90,6 +90,62 @@ test('renders Unicode bullet points (•) and inline glued bullets as <ul><li> l
   const html = renderMarkdown(unicodeBullets);
   assert.match(html, /<p><span class="src-badge">Source: Ecolab — AppSec Engineer<\/span><\/p>/);
   assert.match(html, /<ul><li><strong>First point<\/strong> — I built the scanner\.<\/li><li><strong>Second point<\/strong> — We cut latency by 99%\.<\/li><\/ul>/);
+});
+
+// ── Streaming: finished blocks are rendered once ────────────────────────────
+// While an answer streams in, the renderer keeps the HTML for everything up to
+// the last settled point and re-renders only the block still being written.
+// That is only safe if it produces exactly what a full render would.
+
+const STREAM_SAMPLES = {
+  'talk track with divider': '[Source: Ecolab — AppSec Engineer]\n- **Cut load time** — I dropped latency by 99%.\n- **Owned rollout** — we shipped in two weeks.\n\n---\n\nDeeper detail: we used `EF Core` projections.\n\n1. First step\n2. Second step\n\nDone.',
+  'fenced code with blank lines inside': '(1) Restate the problem.\n\n(2) Approach in plain words.\n\n(3)\n```python\ndef f(xs):\n\n    seen = set()\n\n    return seen\n```\n\n(4) Time complexity: `O(n)`.\n\n(5) Improvements:\n- use a map\n- handle empty input',
+  'unclosed fence then prose sections': '(3) ```cpp class Solution { public:\nint minCut(string s) {\n\nreturn 0; } };\n\n\n(4) Time complexity: `O(n^2)`.\nSpace complexity: `O(n)`.\n\n(5) Improvements / alternatives:\n- Use center expansion.',
+  'glued bullets and numbered items': '### Justification: 1. Versatility across stacks. 2. High demand skills.\n\nIntro text • **First** — one. • **Second** — two.\n\nClosing line.',
+  'windows line endings': 'First paragraph.\r\n\r\n- item one\r\n- item two\r\n\r\nLast paragraph.',
+  'two fences on one line': 'Use ```js let a = 1;``` inline.\n\nNext paragraph.\n\n```\nplain\n```\n\nEnd.',
+  'whitespace-only separator lines': 'Para one.\n   \nPara two.\n\t\n- a\n- b\n  \nPara three.'
+};
+
+// Shapes where the fence state never returns to "closed" (an opener with no
+// closer, or two fences on one line). Nothing is frozen for these, so they are
+// simply re-rendered in full each time, exactly as before.
+const NEVER_SETTLES = new Set(['unclosed fence then prose sections', 'two fences on one line']);
+
+for (const [name, sample] of Object.entries(STREAM_SAMPLES)) {
+  test(`streaming render equals a full render at every length: ${name}`, () => {
+    let frozenChars = 0;
+    let frozenHtml = '';
+    for (let length = 1; length <= sample.length; length++) {
+      const raw = sample.slice(0, length);
+
+      // The split point reported for the whole text is a true split point.
+      const whole = renderMarkdownParts(raw);
+      assert.equal(whole.html, renderMarkdown(raw));
+      assert.equal(
+        renderMarkdown(raw.slice(0, whole.stableOffset)) + renderMarkdown(raw.slice(whole.stableOffset)),
+        whole.html,
+        `split at ${whole.stableOffset} changes the output at length ${length}`
+      );
+
+      // What the renderer actually does: render only the part not yet frozen.
+      const pending = renderMarkdownParts(raw.slice(frozenChars));
+      frozenHtml += pending.html.slice(0, pending.stableHtmlLength);
+      frozenChars += pending.stableOffset;
+      const shown = frozenHtml + pending.html.slice(pending.stableHtmlLength);
+      assert.equal(shown, whole.html, `incremental output diverged at length ${length}`);
+    }
+    if (NEVER_SETTLES.has(name)) assert.equal(frozenChars, 0);
+    else assert.ok(frozenChars > 0, 'the sample should freeze at least one block');
+  });
+}
+
+test('nothing is frozen inside an open code fence or before a line has ended', () => {
+  assert.equal(renderMarkdownParts('```js\nlet a = 1;\n\nlet b = 2;\n').stableOffset, 0);
+  assert.equal(renderMarkdownParts('One paragraph').stableOffset, 0);
+  assert.equal(renderMarkdownParts('One paragraph\n').stableOffset, 0);
+  assert.equal(renderMarkdownParts('One paragraph\n\n').stableOffset, 15);
+  assert.equal(renderMarkdownParts('').stableOffset, 0);
 });
 
 

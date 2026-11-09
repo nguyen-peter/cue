@@ -3,6 +3,7 @@
   const { icon } = window.ICONS;
   const cue = window.cue; // exposed by preload
   const renderMarkdown = window.renderMarkdown;
+  const renderMarkdownParts = window.renderMarkdownParts;
   const $ = (s) => document.querySelector(s);
   const isWindows = cue.platform === 'win32';
   const isMac = cue.platform === 'darwin';
@@ -38,12 +39,32 @@
   let busy = false;
   let aiEl = null;       // current streaming <div class="ai-text">
   let caretEl = null;
+  // The answer being streamed. Blocks that are finished (everything before the
+  // last blank line outside a code fence) are rendered once and left in the
+  // page; only the block still being written is re-rendered per token. Before,
+  // every token re-parsed the whole answer and rebuilt all of its DOM, so the
+  // cost of an answer grew with the square of its length.
+  let aiRaw = '';        // markdown received so far
+  let aiFrozenChars = 0; // how much of aiRaw is already in the page for good
+  let aiFrozenNodes = 0; // how many child nodes of aiEl that part produced
   let responseCount = 0;
   const MAX_RESPONSES = 20;
 
   const messages = $('#messages');
 
-  function clearMessages() { messages.innerHTML = ''; aiEl = null; caretEl = null; }
+  function clearMessages() { messages.innerHTML = ''; aiEl = null; caretEl = null; resetAiStream(); }
+
+  function resetAiStream() {
+    aiRaw = '';
+    aiFrozenChars = 0;
+    aiFrozenNodes = 0;
+  }
+
+  // The markdown behind an answer: live text for the one streaming, otherwise
+  // what finalizeAi stored on the element.
+  function rawOf(el) {
+    return el && el === aiEl ? aiRaw : ((el && el.dataset.raw) || '');
+  }
 
   function addUserBubble(text) {
     const b = document.createElement('div');
@@ -52,20 +73,35 @@
     messages.appendChild(b);
   }
 
-  function startAi(small) {
+  // Wire up a fresh answer element as the streaming target.
+  function beginAi(small) {
+    resetAiStream();
     aiEl = document.createElement('div');
     aiEl.className = 'ai-text' + (small ? ' small' : '');
     aiEl.dataset.raw = '';
     caretEl = document.createElement('span');
     caretEl.className = 'ai-caret';
     aiEl.appendChild(caretEl);
-    messages.appendChild(aiEl);
+    return aiEl;
+  }
+
+  function startAi(small) {
+    messages.appendChild(beginAi(small));
   }
 
   function appendToken(t) {
     if (!aiEl) startAi(false);
-    aiEl.dataset.raw += t;
-    aiEl.innerHTML = renderMarkdown(aiEl.dataset.raw);
+    aiRaw += t;
+    const parts = renderMarkdownParts(aiRaw.slice(aiFrozenChars));
+    // Drop last time's unfinished block (and the caret riding on it).
+    while (aiEl.childNodes.length > aiFrozenNodes) aiEl.removeChild(aiEl.lastChild);
+    if (parts.stableOffset > 0) {
+      aiEl.insertAdjacentHTML('beforeend', parts.html.slice(0, parts.stableHtmlLength));
+      aiFrozenChars += parts.stableOffset;
+      aiFrozenNodes = aiEl.childNodes.length;
+    }
+    const unfinished = parts.html.slice(parts.stableHtmlLength);
+    if (unfinished) aiEl.insertAdjacentHTML('beforeend', unfinished);
     if (caretEl) {
       const last = aiEl.lastElementChild;
       if (last && (last.tagName === 'UL' || last.tagName === 'OL') && last.lastElementChild) {
@@ -146,12 +182,15 @@
     });
   }
 
+  // One full render at the end, so the finished answer never depends on how
+  // it happened to be split while streaming.
   function finalizeAi() {
     if (!aiEl) return;
-    const raw = aiEl.dataset.raw || '';
-    aiEl.innerHTML = renderMarkdown(raw);
+    aiEl.dataset.raw = aiRaw;
+    aiEl.innerHTML = renderMarkdown(aiRaw);
     enhanceCodeBlocks(aiEl);
     aiEl = null; caretEl = null;
+    resetAiStream();
   }
 
   let busyFailsafe = null;
@@ -162,21 +201,6 @@
     // Failsafe: main has a 25s stream watchdog that always sends llm:done/llm:error, but if a
     // terminal event is ever lost the whole UI stays frozen — self-clear after a generous window.
     if (v) busyFailsafe = setTimeout(() => { busy = false; $('#send-btn').classList.toggle('busy', false); }, 40000);
-  }
-
-  // ---- transcript helpers ------------------------------------------------
-  // NOTE: The old transcript-list element was renamed to ts-list.
-  // These helpers are now deprecated but kept for compatibility.
-  // The main sidebar uses appendTranscriptHistoryTurn() instead.
-  let transcriptInterimEl = null;
-
-  // FIX #1: Updated to use ts-list instead of non-existent transcript-list
-
-  function clearTranscriptInterim() {
-    if (transcriptInterimEl) {
-      transcriptInterimEl.remove();
-      transcriptInterimEl = null;
-    }
   }
 
   // ---- toast helper ------------------------------------------------------
@@ -216,13 +240,11 @@
   const placeholder = $('#placeholder');
   const composer = $('#composer');
 
-  // ========== SMART AUTO-FILL SYSTEM ==========
-  // Track whether the current input text came from STT auto-fill (Them channel)
+  // ========== QUESTION INPUT STATE ==========
+  // True when the text in the box is a restored interviewer question (Ctrl+Z)
+  // rather than something the user typed; such text is answered as a question
+  // addressed to the user instead of a question about the screen.
   let inputFromSTT = false;
-  let sttFillTimer = null;
-  let questionFinalizeTimer = null;
-  let softClearTimer = null;
-  let userSpeechStart = null;
 
   // Question history for undo (Ctrl+Z)
   const questionHistory = [];
@@ -375,88 +397,6 @@
     return false;
   }
 
-  // ---- Auto-fill the input box with transcribed speech from interviewer ----
-  function autoFillInputFromSTT(text) {
-    // If user has manually typed something different, don't overwrite
-    if (!inputFromSTT && input.value.trim().length > 0) return;
-
-    // Cancel any pending soft-clear (interviewer is still talking)
-    clearTimeout(softClearTimer);
-    composer.classList.remove('stt-dimmed');
-
-    const current = input.value.trim();
-    const newText = current ? current + ' ' + text : text;
-    input.value = newText;
-    inputFromSTT = true;
-    lastSTTValue = newText; // FIX #6: Track the STT value for edit detection
-    syncPlaceholder();
-
-    // Show filling state
-    composer.classList.add('stt-filling');
-    updateQuestionReadyState();
-    updateSendButtonState(); // FIX #9: Update send button state
-
-    // Reset the idle timer — after 2s of silence, check if question is complete
-    clearTimeout(questionFinalizeTimer);
-    questionFinalizeTimer = setTimeout(() => {
-      if (isLikelyCompleteQuestion(input.value)) {
-        composer.classList.add('stt-ready');
-        updateSendButtonState(); // FIX #9: Update send button when ready
-        // Subtle notification that question is ready
-        showToast('Press Enter to answer', 2500);
-      }
-    }, 1800);
-
-    // After 8s of no new words, save to history and keep stable
-    clearTimeout(sttFillTimer);
-    sttFillTimer = setTimeout(() => {
-      saveToQuestionHistory(input.value);
-      composer.classList.remove('stt-filling');
-      // Keep stt-ready if applicable
-      updateQuestionReadyState();
-      updateSendButtonState(); // FIX #9
-    }, 8000);
-  }
-
-  // ---- Soft clear: don't immediately wipe question when user speaks ----
-  function softClearSTTFill() {
-    // When the user speaks (You channel), don't immediately clear
-    // Instead, dim the input and wait — they might just be acknowledging
-    if (!inputFromSTT) return;
-    
-    // FIX #3: Reset userSpeechStart at the beginning before setting new timestamp
-    // This ensures we always track from fresh when a new soft-clear cycle begins
-    const now = Date.now();
-    if (!userSpeechStart) {
-      userSpeechStart = now;
-    }
-
-    // Dim the input to show it's in "pending clear" state
-    composer.classList.add('stt-dimmed');
-    
-    // Clear the finalization timer (user is responding)
-    clearTimeout(questionFinalizeTimer);
-
-    // Re-armed on every 'you' final, so this fires ~800ms after the user stops.
-    // The 2s test below is measured from the FIRST final of this cycle, so a brief
-    // acknowledgement ("mm-hm") leaves the question on screen while a sustained
-    // answer clears it. Firing at 2.5s instead would make that test always true.
-    clearTimeout(softClearTimer);
-    softClearTimer = setTimeout(() => {
-      const speechDuration = userSpeechStart ? Date.now() - userSpeechStart : 0;
-      if (speechDuration > 2000) {
-        // User has been speaking for a while — they're answering, clear the box
-        saveToQuestionHistory(input.value);
-        input.value = '';
-        inputFromSTT = false;
-        composer.classList.remove('stt-filling', 'stt-dimmed', 'stt-ready', 'stt-accumulating');
-        syncPlaceholder();
-        updateSendButtonState(); // FIX #9: Update send button state
-        userSpeechStart = null;
-      }
-    }, 800);
-  }
-
   // ---- Hard clear (called when user explicitly clears or types) ----
   // FIX #10: Add option to show toast when clearing
   function hardClearSTTFill(showUndoHint = false) {
@@ -465,12 +405,7 @@
     input.value = '';
     inputFromSTT = false;
     lastSTTValue = ''; // FIX #6: Clear the tracked STT value
-    userSpeechStart = null;
     composer.classList.remove('stt-filling', 'stt-dimmed', 'stt-ready', 'stt-accumulating');
-    clearTimeout(softClearTimer);
-    clearTimeout(questionFinalizeTimer);
-    clearTimeout(sttFillTimer);
-    clearInputInterim(); // FIX #5: Clear interim when clearing input
     syncPlaceholder();
     updateSendButtonState(); // FIX #9
     updateHistoryBadge(); // FIX #14
@@ -480,14 +415,6 @@
       const undoHint = isWindows ? 'Ctrl+Z to undo' : '⌘Z to undo';
       showToast(`Cleared · ${undoHint}`, 2000);
     }
-  }
-
-  // ---- Reset soft-clear state (interviewer spoke again) ----
-  // FIX #16: Reset userSpeechStart properly when cancelSoftClear is called
-  function cancelSoftClear() {
-    userSpeechStart = null; // Reset timestamp so next soft-clear starts fresh
-    clearTimeout(softClearTimer);
-    composer.classList.remove('stt-dimmed');
   }
 
   function syncPlaceholder() {
@@ -501,11 +428,13 @@
 
   // Pre-open the provider connection as soon as the user shows intent to ask
   // (focus or typing) — by the time they press Enter, TCP+TLS is already done.
-  // Throttled here to keep IPC quiet; main dedupes per origin as well.
+  // Throttled here to keep IPC quiet; main dedupes per origin as well. The
+  // interval is under the ~4s an idle connection survives for the fetch-based
+  // providers (Gemini), so steady typing keeps the connection open.
   let lastWarmAt = 0;
   function warmLLM() {
     const now = Date.now();
-    if (now - lastWarmAt < 5000) return;
+    if (now - lastWarmAt < 3000) return;
     lastWarmAt = now;
     if (typeof cue.warm === 'function') cue.warm();
   }
@@ -513,10 +442,7 @@
   input.addEventListener('input', () => {
     warmLLM();
     const currentValue = input.value;
-    
-    // FIX #5: Clear interim text when user starts typing
-    clearInputInterim();
-    
+
     // FIX #6: Only detach from STT mode if edit is substantial
     // Minor corrections (typo fixes, small additions) should keep STT mode
     if (inputFromSTT && lastSTTValue) {
@@ -530,8 +456,6 @@
         inputFromSTT = false;
         lastSTTValue = '';
         composer.classList.remove('stt-filling', 'stt-dimmed', 'stt-ready', 'stt-accumulating');
-        clearTimeout(softClearTimer);
-        clearTimeout(questionFinalizeTimer);
       }
       // Minor edits: keep inputFromSTT = true, just update visual state
     } else if (!inputFromSTT) {
@@ -596,11 +520,7 @@
     input.value = '';
     inputFromSTT = false;
     lastSTTValue = ''; // FIX #6: Clear tracked STT value
-    userSpeechStart = null;
     composer.classList.remove('stt-filling', 'stt-dimmed', 'stt-ready', 'stt-accumulating');
-    clearTimeout(softClearTimer);
-    clearTimeout(questionFinalizeTimer);
-    clearTimeout(sttFillTimer);
     syncPlaceholder();
     updateSendButtonState(); // FIX #9
     input.blur();
@@ -644,13 +564,6 @@
     }
   });
   
-  // FIX #4: Add tooltip with keyboard shortcuts to send button
-  const sendBtn = document.getElementById('send-btn');
-  if (sendBtn) {
-    const forceKey = isWindows ? 'Ctrl+Shift+A' : '⌘⇧A';
-    sendBtn.title = `Send · ${forceKey} to force answer`;
-  }
-
   // Smart & Quick toggles
   const smartBtn = $('#smart-toggle');
   const quickBtn = $('#quick-toggle');
@@ -706,6 +619,35 @@
   let lastAutoAttemptTurnCount = -1;
   let lastNotesPublicState = null;
   const AUTO_NOTES_TYPING_IDLE_MS = 3000;
+
+  // Every edit sends the whole document to the main process. Doing that on
+  // each keystroke is wasted work, so typing is sent once it pauses. Anything
+  // that needs the current text right away (leaving the editor, switching
+  // modes) sends immediately, and anything that supersedes it (starting a
+  // generation, clearing) drops the pending send so a stale copy cannot land
+  // on top of newer notes.
+  const NOTES_EDIT_DEBOUNCE_MS = 400;
+  let notesEditTimer = null;
+  let pendingNotesEdit = null;
+  function dropPendingNotesEdit() {
+    clearTimeout(notesEditTimer);
+    notesEditTimer = null;
+    pendingNotesEdit = null;
+  }
+  function flushNotesEdit() {
+    const text = pendingNotesEdit;
+    dropPendingNotesEdit();
+    if (text !== null && typeof cue.notesEdit === 'function') cue.notesEdit(text);
+  }
+  function queueNotesEdit(text) {
+    pendingNotesEdit = text;
+    clearTimeout(notesEditTimer);
+    notesEditTimer = setTimeout(flushNotesEdit, NOTES_EDIT_DEBOUNCE_MS);
+  }
+  function sendNotesEditNow(text) {
+    pendingNotesEdit = text;
+    flushNotesEdit();
+  }
 
   function formatNotesForEditor(raw) {
     return String(raw || '')
@@ -775,6 +717,7 @@
     }
     const currentNotes = notesBody ? notesBody.value.trim() : notesSavedMarkdown;
     notesSavedMarkdown = currentNotes;
+    dropPendingNotesEdit(); // the request below carries the current text
     if (typeof cue.notesGenerate === 'function') {
       cue.notesGenerate({ currentNotes, forceFull: false, task, auto: !!opts.auto });
     }
@@ -808,7 +751,7 @@
     if (!next && notesBody && !notesBusy) {
       const currentMd = notesBody.value;
       notesSavedMarkdown = currentMd;
-      if (typeof cue.notesEdit === 'function') cue.notesEdit(currentMd);
+      sendNotesEditNow(currentMd);
     }
     setNotesModeUI(next);
     if (typeof cue.notesModeSet === 'function') {
@@ -867,7 +810,7 @@
         const edited = notesBody.value;
         notesSavedMarkdown = edited;
         notesRawMarkdown = edited;
-        if (typeof cue.notesEdit === 'function') cue.notesEdit(edited);
+        sendNotesEditNow(edited);
       }
       releaseWindowFocusIfIdle();
     });
@@ -877,7 +820,7 @@
         const edited = notesBody.value;
         notesSavedMarkdown = edited;
         notesRawMarkdown = edited;
-        if (typeof cue.notesEdit === 'function') cue.notesEdit(edited);
+        queueNotesEdit(edited);
       }
     });
   }
@@ -908,6 +851,7 @@
       notesRawMarkdown = '';
       notesSavedMarkdown = '';
       if (notesBody) notesBody.value = '';
+      dropPendingNotesEdit(); // or a late send would put the cleared notes back
       if (typeof cue.notesClear === 'function') {
         const pub = await cue.notesClear();
         lastAutoAttemptTurnCount = Number(pub && pub.totalTurns) || 0;
@@ -970,6 +914,10 @@
       notesRawMarkdown = clean;
       updateNotesEditorPreservingCursor(clean);
     }
+    // A long backlog of speech is written up in slices. If this update stopped
+    // short of the latest turn, let the auto-update pick up the next slice now
+    // instead of waiting for someone to speak again.
+    if (st && Number(st.pendingTurns) > 0 && st.autoShouldUpdate) lastAutoAttemptTurnCount = -1;
     syncNotesStateUI(st);
   });
   cue.on('notes:error', ({ message }) => {
@@ -1044,7 +992,6 @@
     // FIX #1: Use ts-list instead of non-existent transcript-list
     const list = document.getElementById('ts-list');
     if (list) list.innerHTML = '<div class="ts-placeholder">Conversation history will appear here when listening.</div>';
-    transcriptInterimEl = null;
     clearTranscriptSidebar(); // clear the history sidebar too
     hardClearSTTFill(); // clear the input box too
 
@@ -1234,13 +1181,6 @@
     if (!dot) return;
     dot.classList.remove('off', 'idle', 'speaking', 'transcribing');
     dot.classList.add(dotState);
-    const labels = {
-      off:          'Not listening',
-      idle:         'Listening — silence detected',
-      speaking:     'Speech detected',
-      transcribing: 'Transcribing…'
-    };
-    dot.title = labels[dotState] || '';
   }
 
   let sttState = 'disconnected';
@@ -1497,25 +1437,8 @@
     }
     return interimEl;
   }
-  // FIX #12: Show interim text in input box (grayed/italic) before final arrives
-  let inputInterimEl = null;
-  function showInterimInInput(text) {
-    if (!inputInterimEl) {
-      inputInterimEl = document.createElement('span');
-      inputInterimEl.className = 'input-interim';
-      // FIX #2: Insert into composer (not input-area) for correct positioning
-      composer.appendChild(inputInterimEl);
-    }
-    inputInterimEl.textContent = text;
-    inputInterimEl.style.display = text ? 'block' : 'none';
-  }
-  function clearInputInterim() {
-    if (inputInterimEl) {
-      inputInterimEl.textContent = '';
-      inputInterimEl.style.display = 'none';
-    }
-  }
-  
+
+
   cue.on('stt:interim', ({ channel, text }) => {
     setLiveDotState('transcribing');
     const el = getOrCreateInterimEl();
@@ -1528,8 +1451,6 @@
     setLiveDotState('idle');
     // Clear interim when we get a final
     if (interimEl) { interimEl.textContent = ''; interimEl.classList.remove('show'); }
-    clearTranscriptInterim();
-    clearInputInterim(); // FIX #12: Clear interim text from input area
     // sidebar: the final turn is added via the 'transcript' event below
   });
   cue.on('stt:status', ({ channel, status, provider }) => {
@@ -1587,9 +1508,10 @@
       const targetAi = group.querySelector('.ai-text');
       if (!targetAi) return;
       const codeEl = targetAi.querySelector('pre code');
-      const textToCopy = codeEl && (targetAi.dataset.raw || '').includes('```')
-        ? (targetAi.dataset.raw || targetAi.innerText || '').trim()
-        : (targetAi.innerText || targetAi.dataset.raw || '').trim();
+      const raw = rawOf(targetAi);
+      const textToCopy = codeEl && raw.includes('```')
+        ? (raw || targetAi.innerText || '').trim()
+        : (targetAi.innerText || raw || '').trim();
       copyToClipboard(textToCopy, 'Copied response');
       copyRespBtn.textContent = 'Copied ✓';
       setTimeout(() => { copyRespBtn.textContent = 'Copy'; }, 1400);
@@ -1609,13 +1531,7 @@
       pill.textContent = category.charAt(0).toUpperCase() + category.slice(1);
       group.appendChild(pill);
     }
-    aiEl = document.createElement('div');
-    aiEl.className = 'ai-text' + (small ? ' small' : '');
-    aiEl.dataset.raw = '';
-    caretEl = document.createElement('span');
-    caretEl.className = 'ai-caret';
-    aiEl.appendChild(caretEl);
-    group.appendChild(aiEl);
+    group.appendChild(beginAi(small));
     messages.appendChild(group);
     // Use requestAnimationFrame so the DOM is fully updated before scrolling
     requestAnimationFrame(() => {
@@ -1627,7 +1543,7 @@
   cue.on('llm:done', () => { finalizeAi(); setBusy(false); });
   cue.on('llm:error', ({ message }) => {
     if (!aiEl) startAi(true);
-    aiEl.dataset.raw = message; finalizeAi(); setBusy(false);
+    aiRaw = message; finalizeAi(); setBusy(false);
   });
   cue.on('transcript', ({ channel, text }) => {
     if (!text || text.trim().length < 2 || /^[?!.,;:\-…]+$/.test(text.trim())) return;
@@ -1699,7 +1615,6 @@
     questionItems.forEach((item, i) => {
       const row = document.createElement('div');
       row.className = 'qq-item' + (item.pinned ? ' pinned' : '');
-      row.title = item.text;
 
       const key = document.createElement('span');
       key.className = 'keycap';
@@ -1713,7 +1628,6 @@
       if (item.pinned) {
         pinEl = document.createElement('span');
         pinEl.className = 'qq-pin';
-        pinEl.title = 'Pre-typed — stays until answered or dismissed';
         pinEl.innerHTML = icon('pin', { size: 10 });
       }
 
@@ -1919,68 +1833,16 @@
       const loaded = fields[el.dataset.field];
       el.classList.toggle('loaded', loaded);
       el.classList.toggle('missing', !loaded);
+      // The phone chip is always shown as available.
       if (el.dataset.field === 'phone') {
         el.classList.add('loaded');
         el.classList.remove('missing');
-        el.title = 'Pair your phone via QR code (Settings → Phone)';
-        return;
       }
-      if (el.dataset.field === 'coding') {
-        el.title = loaded
-          ? 'Custom coding instructions — click to edit'
-          : "Coding solves use cue's default — click to customize";
-        return;
-      }
-      el.title = loaded
-        ? el.textContent.trim() + ' loaded — click to edit'
-        : el.textContent.trim() + ' not set — click to add';
     });
-  }
-
-  function updateSmartTooltip() {
-    if (!settings) return;
-    const m = settings.models[settings.provider] || { fast: '', smart: '' };
-    const fast = m.fast || 'fast model';
-    const smart = m.smart || 'smart model';
-    const btn = document.getElementById('smart-toggle');
-    if (btn) btn.title = 'Fast: ' + fast + ' · Smart: ' + smart + ' (higher quality, ~2× slower)';
-  }
-
-  // ---- microphone permission banner --------------------------------------
-  function showMicPermissionBanner() {
-    let banner = document.getElementById('mic-perm-banner');
-    if (banner) { banner.classList.add('show'); return; }
-    banner = document.createElement('div');
-    banner.id = 'mic-perm-banner';
-    banner.className = 'show';
-    banner.innerHTML =
-      '<div class="mic-perm-text">' +
-        '<strong>Microphone access required</strong><br>' +
-        'cue needs microphone permission to hear you during calls. Grant access in System Settings, then restart cue.' +
-      '</div>' +
-      '<div class="mic-perm-actions"></div>';
-    const actions = banner.querySelector('.mic-perm-actions');
-    if (cue.platform === 'darwin') {
-      const openBtn = document.createElement('button');
-      openBtn.textContent = 'Open Microphone Settings';
-      openBtn.addEventListener('click', () => cue.openPane('x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'));
-      actions.appendChild(openBtn);
-    }
-    const dismissBtn = document.createElement('button');
-    dismissBtn.textContent = 'Dismiss';
-    dismissBtn.className = 'dismiss';
-    dismissBtn.addEventListener('click', () => banner.classList.remove('show'));
-    actions.appendChild(dismissBtn);
-    const panel = document.getElementById('panel');
-    panel.insertBefore(banner, document.getElementById('action-row'));
   }
 
   // ---- settings ----------------------------------------------------------
   const scrim = $('#settings-scrim');
-  function openSettings() { fillSettings(); scrim.classList.remove('hidden'); }
-  async function closeSettings() {
-    if (await saveSettings()) scrim.classList.add('hidden');
-  }
   function openSettings() {
     if (typeof cue.setFocusable === 'function') cue.setFocusable(true);
     fillSettings();
@@ -2059,6 +1921,9 @@
     $('#base-url').value = settings.baseUrl || '';
     updateCustomProviderFields();
     $('#key-ollama').value = settings.apiKeys.ollama || '';
+    // Falls back to the default if the saved value is not one of the choices.
+    $('#notes-context').value = String(settings.notesContextTokens || 4096);
+    if (!$('#notes-context').value) $('#notes-context').value = '4096';
     $('#key-groq').value = settings.apiKeys.groq || '';
     $('#key-minimax').value = settings.apiKeys.minimax || '';
     document.querySelectorAll('#minimax-region-seg button').forEach((b) => b.classList.toggle('on', b.dataset.region === (settings.minimaxRegion || 'global_en')));
@@ -2120,7 +1985,6 @@
       row.className = 's-caller';
       const label = document.createElement('span');
       label.textContent = name + ' — ' + (allowed.length ? allowed.join(' + ') : 'denied');
-      label.title = id;
       const button = document.createElement('button');
       button.type = 'button';
       button.textContent = 'Forget';
@@ -2195,7 +2059,6 @@
     const m = settings.models[settings.provider] || { fast: '', smart: '' };
     $('#model-fast').value = m.fast; $('#model-smart').value = m.smart;
     $('#s-status').textContent = statusText();
-    updateSmartTooltip();
   }));
   document.querySelectorAll('#minimax-region-seg button').forEach((b) => b.addEventListener('click', () => {
     settings.minimaxRegion = b.dataset.region;
@@ -2256,7 +2119,6 @@
       runtimeBadge.textContent = whisperOverview.runtime.available
         ? `Ready · v${whisperOverview.runtime.version} · ${whisperOverview.runtime.target}`
         : 'Not prepared';
-      runtimeBadge.title = whisperOverview.runtime.message || '';
 
       const select = $('#whisper-model');
       select.innerHTML = '';
@@ -2440,6 +2302,7 @@
     settings.apiKeys.custom = $('#key-custom').value.trim();
     settings.baseUrl = $('#base-url').value.trim();
     settings.apiKeys.ollama = $('#key-ollama').value.trim();
+    settings.notesContextTokens = Number.parseInt($('#notes-context').value, 10) || 4096;
     settings.apiKeys.groq = $('#key-groq').value.trim();
     settings.apiKeys.minimax = $('#key-minimax').value.trim();
     settings.apiKeys.azure = $('#key-azure').value.trim();
@@ -2475,7 +2338,6 @@
       settings = await cue.settingsSet(settings);
       $('#s-status').textContent = statusText();
       updatePrepStatus();
-      updateSmartTooltip();
       return true;
     } catch (error) {
       const message = error && error.message ? error.message : String(error);
@@ -2754,8 +2616,6 @@
 
     // R5: prep status
     updatePrepStatus();
-    // R6: smart tooltip
-    updateSmartTooltip();
     // Fix 3: Adjust permission buttons based on actual Windows version.
     // ms-settings:privacy-screenrecorder only exists on Windows 11.
     // On Windows 10, screen capture needs no permission — so replace the button

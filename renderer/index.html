@@ -194,6 +194,15 @@
           <div class="s-help">Your Custom key and LLM requests are sent to this URL. Speech-to-text continues to use Deepgram, OpenAI, or Gemini.</div>
         </div>
         <div class="s-field"><span>Ollama URL</span><input id="key-ollama" type="text" placeholder="http://localhost:11434" autocomplete="off" /></div>
+        <div class="s-field">
+          <span>Notes context</span>
+          <select id="notes-context" class="s-select compact">
+            <option value="4096">4,096 tokens (default)</option>
+            <option value="8192">8,192 tokens</option>
+            <option value="16384">16,384 tokens</option>
+          </select>
+        </div>
+        <div class="s-help">How much text the local Notes model reads per update. Larger sees more of your notes at once but is slower and uses more memory. Changing it reloads the model on the next update.</div>
         <div class="s-field"><span>Groq</span><input id="key-groq" type="password" placeholder="gsk_..." autocomplete="off" /></div>
         <div class="s-field"><span>Azure AI Foundry</span><input id="key-azure" type="password" placeholder="azure key or Entra token" autocomplete="off" /></div>
 

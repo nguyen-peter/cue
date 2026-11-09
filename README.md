@@ -215,6 +215,24 @@ main process ──┬─ overlay window (frameless, transparent, always-on-top,
 renderer ──────┴─ the glass UI + mic capture + system-audio loopback
 ```
 
+### Measuring speed
+
+Start cue with `CUE_PERF=1` (PowerShell: `$env:CUE_PERF=1; npm start`) to print one line per answer, notes update, and transcribed utterance (some fields omitted here):
+
+```
+[perf] qna mode=ask provider=gemini model=gemini-3.5-flash-lite request_sent=4ms first_token=612ms cacheable_prefix_chars=7879 conn_age_ms=1200 prompt_tokens=3310 cached_tokens=2816 total=1894ms
+[perf] notes task=update engine_ready=1ms request_sent=3ms first_token=840ms prompt_chars=2151 prompt_tokens=366 prompt_eval_ms=512 total=4100ms
+[perf] stt mode=batch channel=them provider=gemini audio_ms=2400 transcribe_ms=640 since_speech_end_ms=655
+```
+
+- `first_token` is the wait before the answer starts. `cached_tokens` above zero means the provider reused the start of the prompt (your document, résumé and job description) instead of reading it again.
+- `conn_age_ms` is how long ago the provider connection was last opened or used; `none` means the request had to open one.
+- For Notes, `prompt_eval_ms` is the time the local model spent reading the prompt. It should drop on the second and later updates, when the notes at the start of the prompt are still in the model's cache.
+
+`npm run bench:notes` replays a scripted meeting against your local Ollama model and prints the same figures per request, plus whether any bullet was lost or repeated. `npm run bench:notes -- --legacy` runs it with the request shape cue used before (2,048-token window, whole document resent) for comparison. Nothing is sent anywhere except your Ollama server.
+
+The local Notes model reads a bounded amount per update. If your notes are long and you want it to see more of them at once, raise **Settings → Keys → Notes context** (slower, and uses more memory).
+
 ---
 
 ## Troubleshooting

@@ -18,33 +18,47 @@ function inline(s) {
 // Headings that must never sit inside a solution fence if the model forgot ```.
 const CODE_LEAK_RE = /^\s*(?:\(([4-9]|[1-9]\d)\)\s|Time\s+complexity\b|Space\s+complexity\b|Improvements\b)/i;
 
-function renderMarkdown(text) {
-  // Preprocess lines: expand inline lists that were glued together on a single line
-  const rawLines = String(text || '').split(/\r?\n/);
-  const lines = [];
-  let inCodeBlock = false;
+// Expand lists and dividers the model glued onto one line into separate lines.
+function splitGluedLine(raw) {
+  // Split badge tags from inline bullets or text on the same line:
+  // "[Source: Role] • **Point**" -> "[Source: Role]\n• **Point**"
+  let l = raw.replace(/(\[(?:Source:[^\]]+|Not on resume[^\]]+)\])\s+(?=[-*+•‣◦▪▸]|\d+[.)]|\*\*)/gi, '$1\n');
+  // Split heading from inline list: "### Title: 1. Item" or "### Title: - Item"
+  l = l.replace(/^(#{1,6}\s+[^:]+:?)\s+(?=(?:\d+[.)]|[-*+•‣◦▪▸])\s+)/, '$1\n');
+  // Split inline Unicode bullets glued on the same line: "...text • Next bullet"
+  l = l.replace(/\s+(?=[•‣◦▪▸]\s+)/g, '\n');
+  // Split inline markdown bullets glued after sentence punctuation: "...sentence. - **Next**"
+  l = l.replace(/([:;.!?])\s+(?=[-*+]\s+\*\*)/g, '$1\n');
+  // Split inline numbered items: "...sentence. 2. Next item" -> "...sentence.\n2. Next item"
+  l = l.replace(/([:;.!?])\s+(?=\d+[.)]\s+[A-Z*])/g, '$1\n');
+  // Split inline horizontal rule: "...sentence. --- Next"
+  l = l.replace(/\s+---\s+/g, '\n---\n');
+  return l.split('\n');
+}
 
-  for (const raw of rawLines) {
-    if (raw.includes('```')) inCodeBlock = !inCodeBlock;
-    if (!inCodeBlock) {
-      // Split badge tags from inline bullets or text on the same line:
-      // "[Source: Role] • **Point**" -> "[Source: Role]\n• **Point**"
-      let l = raw.replace(/(\[(?:Source:[^\]]+|Not on resume[^\]]+)\])\s+(?=[-*+•‣◦▪▸]|\d+[.)]|\*\*)/gi, '$1\n');
-      // Split heading from inline list: "### Title: 1. Item" or "### Title: - Item"
-      l = l.replace(/^(#{1,6}\s+[^:]+:?)\s+(?=(?:\d+[.)]|[-*+•‣◦▪▸])\s+)/, '$1\n');
-      // Split inline Unicode bullets glued on the same line: "...text • Next bullet"
-      l = l.replace(/\s+(?=[•‣◦▪▸]\s+)/g, '\n');
-      // Split inline markdown bullets glued after sentence punctuation: "...sentence. - **Next**"
-      l = l.replace(/([:;.!?])\s+(?=[-*+]\s+\*\*)/g, '$1\n');
-      // Split inline numbered items: "...sentence. 2. Next item" -> "...sentence.\n2. Next item"
-      l = l.replace(/([:;.!?])\s+(?=\d+[.)]\s+[A-Z*])/g, '$1\n');
-      // Split inline horizontal rule: "...sentence. --- Next"
-      l = l.replace(/\s+---\s+/g, '\n---\n');
-      for (const sub of l.split('\n')) lines.push(sub);
-    } else {
-      lines.push(raw);
-    }
-  }
+/**
+ * Render `text` and also report the last point up to which the output is
+ * settled. Returns { html, stableOffset, stableHtmlLength }:
+ *
+ *   stableOffset     — characters of `text` ending just after the last blank
+ *                      line that sits outside any code fence (0 if none).
+ *   stableHtmlLength — length of the HTML produced for that part.
+ *
+ * A blank line outside a fence closes every open paragraph and list, so the
+ * renderer is back in its starting state there. Text appended later can only
+ * change the HTML after `stableHtmlLength`, and
+ *
+ *   renderMarkdown(text) === renderMarkdown(text.slice(0, stableOffset))
+ *                          + renderMarkdown(text.slice(stableOffset))
+ *
+ * which is what lets a streaming answer keep its finished blocks in the page
+ * and re-render only the block still being written.
+ */
+function renderMarkdownParts(text) {
+  const source = String(text || '');
+  let inCodeBlock = false; // line-splitting's view of "inside a fence"
+  let stableOffset = 0;
+  let stableHtmlLength = 0;
 
   let html = '';
   let inCode = false;
@@ -177,16 +191,39 @@ function renderMarkdown(text) {
     if (after) processLine(after);
   }
 
-  for (const line of lines) processLine(line);
+  const lineBreak = /\r?\n/g;
+  let lineStart = 0;
+  for (;;) {
+    const found = lineBreak.exec(source);
+    const raw = source.slice(lineStart, found ? found.index : source.length);
+
+    if (raw.includes('```')) inCodeBlock = !inCodeBlock;
+    if (inCodeBlock) processLine(raw);
+    else for (const line of splitGluedLine(raw)) processLine(line);
+
+    if (!found) break;
+    lineStart = found.index + found[0].length;
+    // Only a line that has ended (its newline has arrived) can be a boundary:
+    // an empty tail is just text that has not been written yet.
+    if (raw.trim() === '' && !inCode && !inCodeBlock) {
+      stableOffset = lineStart;
+      stableHtmlLength = html.length;
+    }
+  }
   flushP();
   closeList();
   if (inCode) closeCode();
-  return html;
+  return { html, stableOffset, stableHtmlLength };
+}
+
+function renderMarkdown(text) {
+  return renderMarkdownParts(text).html;
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { renderMarkdown, esc };
+  module.exports = { renderMarkdown, renderMarkdownParts, esc };
 }
 if (typeof window !== 'undefined') {
   window.renderMarkdown = renderMarkdown;
+  window.renderMarkdownParts = renderMarkdownParts;
 }

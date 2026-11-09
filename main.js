@@ -7,10 +7,10 @@ const { createSTT, looksLikeHallucination, buildVocabPrompt } = require('./src/s
 const { parseDocumentFile } = require('./src/resume');
 const { createLLM } = require('./src/llm');
 const { MODES, LEETCODE_DEFAULT_INSTRUCTIONS, QUICK_GOTCHA_SYSTEM, buildQuickTurn } = require('./src/prompts');
-const { rms16 } = require('./src/wav');
+const { rms16, findQuietCut } = require('./src/wav');
 const { createStreamingSTT } = require('./src/stt-streaming');
-const { AdaptiveVAD, AudioRingBuffer } = require('./src/vad');
-const { buildInterviewContext, detectCategory } = require('./src/interview-context');
+const { AdaptiveVAD } = require('./src/vad');
+const { buildInterviewContextParts, detectCategory } = require('./src/interview-context');
 const { createQuestionDetector, normalize: normalizeQuestion } = require('./src/question-detector');
 const { createQuestionQueue } = require('./src/question-queue');
 const { createChatHistory } = require('./src/chat-history');
@@ -18,10 +18,15 @@ const { createTokenCoalescer } = require('./src/token-coalesce');
 const {
   LIVE_NOTES_SYSTEM,
   buildLiveNotesPrompt,
+  planNotesUpdate,
   mergeNotesSection,
+  notesBudget,
+  notesOutputTokens,
   countTranscriptWords,
   shouldAutoUpdateNotes
 } = require('./src/notes');
+const { createNotesEngine, preloadLocalOllamaModel } = require('./src/notes-engine');
+const { createTrace, logPerf } = require('./src/perf');
 const { startAppLink, stopAppLink, recordEvent, appLinkConsentState, revokeAppLinkCaller } = require('./src/applink');
 
 // macOS system-audio loopback (the "them" channel via getDisplayMedia) does not
@@ -125,6 +130,15 @@ let captureTransition = Promise.resolve(false);
 // -------- streaming STT state --------
 let streamingSTT = { you: null, them: null }; // streaming STT instances per channel
 let streamingMode = false; // true when using WebSocket streaming STT
+// When each channel's speaker last stopped talking. Only used to report, under
+// CUE_PERF=1, how long a transcript took to appear after the speech ended.
+const speechEndedAt = { you: 0, them: 0 };
+function takeSinceSpeechEnd(channel) {
+  const endedAt = speechEndedAt[channel];
+  speechEndedAt[channel] = 0;
+  return endedAt ? Date.now() - endedAt : undefined;
+}
+
 const vad = {
   you: new AdaptiveVAD({
     onsetThreshold: 380,
@@ -132,7 +146,7 @@ const vad = {
     silenceFrames: 16,       // ~480ms silence before end
     minSpeechFrames: 6,
     onSpeechStart: () => send('vad:state', { channel: 'you', speaking: true }),
-    onSpeechEnd: (dur) => { send('vad:state', { channel: 'you', speaking: false, durationMs: dur }); flushUtterance('you'); },
+    onSpeechEnd: (dur) => { speechEndedAt.you = Date.now(); send('vad:state', { channel: 'you', speaking: false, durationMs: dur }); flushUtterance('you'); },
     onSpeechCancel: () => send('vad:state', { channel: 'you', speaking: false, durationMs: 0 })
   }),
   them: new AdaptiveVAD({
@@ -140,14 +154,9 @@ const vad = {
     offsetThreshold: 120,
     silenceFrames: 16,       // ~480ms for remote audio
     onSpeechStart: () => send('vad:state', { channel: 'them', speaking: true }),
-    onSpeechEnd: (dur) => { send('vad:state', { channel: 'them', speaking: false, durationMs: dur }); flushUtterance('them'); },
+    onSpeechEnd: (dur) => { speechEndedAt.them = Date.now(); send('vad:state', { channel: 'them', speaking: false, durationMs: dur }); flushUtterance('them'); },
     onSpeechCancel: () => send('vad:state', { channel: 'them', speaking: false, durationMs: 0 })
   })
-};
-// Pre-speech ring buffers (300ms) so we never clip the start of a word
-const ringBuffers = {
-  you: new AudioRingBuffer(300, 16000),
-  them: new AudioRingBuffer(300, 16000)
 };
 
 // -------- detected-question queue --------
@@ -211,14 +220,18 @@ const notesState = {
   engineLabel: 'Local Ollama / Free LLM'
 };
 
-function getNotesPublicState() {
+// `includeMarkdown: false` leaves the notes text out. The per-turn update only
+// needs the counters (the "+N new" badge and the auto-update check), and the
+// renderer already holds the text, so there is no reason to copy the whole
+// document across IPC every time someone finishes a sentence.
+function getNotesPublicState({ includeMarkdown = true } = {}) {
   const pendingSlice = transcript.slice(notesState.lastTurnIndex);
   const pendingTurns = pendingSlice.length;
   const pendingWords = countTranscriptWords(pendingSlice);
   return {
     modeActive: notesState.modeActive,
     busy: notesState.busy,
-    markdown: notesState.markdown,
+    ...(includeMarkdown ? { markdown: notesState.markdown } : {}),
     lastTurnIndex: notesState.lastTurnIndex,
     totalTurns: transcript.length,
     pendingTurns,
@@ -242,7 +255,9 @@ function pushTranscript(turn) {
     notesState.lastTurnIndex = Math.max(0, notesState.lastTurnIndex - removed);
   }
   if (turn.channel === 'them' && !notesState.modeActive) handleThemUtterance(turn.text, turn.ts);
-  send('notes:state', getNotesPublicState());
+  // Nothing reads the notes counters outside Notes mode; entering it fetches
+  // a fresh, complete state.
+  if (notesState.modeActive) send('notes:state', getNotesPublicState({ includeMarkdown: false }));
 }
 
 function send(channel, data) {
@@ -297,9 +312,18 @@ async function startLocalWhisper(settings) {
       },
       onTranscript: publishTranscript,
       onSpeechState: (channel, speaking, durationMs) => {
+        if (!speaking && durationMs) speechEndedAt[channel] = Date.now();
         send('vad:state', { channel, speaking, durationMs });
       },
       onStatus: (status) => send('stt:status', { provider: 'local', ...status }),
+      onTiming: ({ channel, waitMs, inferenceMs, audioMs }) => logPerf('stt', {
+        mode: 'local',
+        channel,
+        audio_ms: audioMs,
+        queue_wait_ms: waitMs,
+        inference_ms: inferenceMs,
+        since_speech_end_ms: takeSinceSpeechEnd(channel)
+      }),
       onError: (error) => {
         sttDisabled = true;
         console.log('[local-whisper] error', error && error.message);
@@ -477,24 +501,54 @@ function createWindow() {
 }
 
 // -------- STT flushing (batch mode fallback) --------
-async function flushChannel(channel) {
+// One batch transcriber per listening session. It used to be rebuilt for every
+// utterance, which re-scanned the résumé / job description / document for
+// vocabulary each time and threw away the 30-second quota back-off, so a
+// rate-limited key was retried on the very next utterance.
+let batchSTT = null;
+function getBatchSTT(settings) {
+  if (!batchSTT) batchSTT = createSTT(settings);
+  return batchSTT;
+}
+
+// `splitAtPause` is set when a speaker has talked past the length cap and is
+// still going: the audio is cut at the quietest moment near the end, and what
+// follows stays in the buffer as the start of the next piece.
+async function flushChannel(channel, { splitAtPause = false } = {}) {
   if (state.transcribing[channel]) return;
   const chunks = buffers[channel];
   if (!chunks.length) return;
-  const pcm = Buffer.concat(chunks);
+  let pcm = Buffer.concat(chunks);
   buffers[channel] = [];
+  if (splitAtPause) {
+    const cut = findQuietCut(pcm);
+    if (cut < pcm.length) {
+      buffers[channel] = [Buffer.from(pcm.subarray(cut))];
+      pcm = pcm.subarray(0, cut);
+    }
+  }
   if (pcm.length < MIN_BYTES) return;
   if (rms16(pcm) < RMS_GATE) return; // silence gate
 
   state.transcribing[channel] = true;
   try {
     const settings = store.getSettings();
-    const stt = createSTT(settings);
+    const stt = getBatchSTT(settings);
     if (!stt.available) {
       if (!sttDisabled) { sttDisabled = true; send('status', { message: 'No transcription key set. Add an OpenAI (Whisper), Deepgram, or Gemini key in Settings to enable listening. Screen/LeetCode features work without it.' }); }
       return;
     }
+    const startedAt = Date.now();
     const res = await stt.transcribe(pcm);
+    logPerf('stt', {
+      mode: 'batch',
+      channel,
+      provider: res.provider || (res.error && res.error.provider),
+      audio_ms: Math.round(pcm.length / 32),
+      transcribe_ms: Date.now() - startedAt,
+      since_speech_end_ms: takeSinceSpeechEnd(channel),
+      status: res.error ? 'error' : undefined
+    });
     if (res.error) {
       handleSttError(res.error, settings);
       return;
@@ -552,8 +606,9 @@ function timedFlush(channel) {
   let buffered = 0;
   for (const chunk of buffers[channel]) buffered += chunk.length;
   if (!buffered) return;
-  if (vad[channel].getState().isSpeaking && buffered < MAX_BATCH_BUFFER_BYTES) return;
-  flushChannel(channel);
+  const speaking = vad[channel].getState().isSpeaking;
+  if (speaking && buffered < MAX_BATCH_BUFFER_BYTES) return;
+  flushChannel(channel, { splitAtPause: speaking });
 }
 
 function startFlushLoop() {
@@ -574,6 +629,9 @@ function initStreamingSTT() {
         pushTranscript(turn);
         send('transcript', turn);
         send('stt:final', { channel: ch, text });
+        // The provider decides a turn is over on its own schedule, sometimes
+        // before the local detector does; then there is no figure to report.
+        logPerf('stt', { mode: 'streaming', channel: ch, since_speech_end_ms: takeSinceSpeechEnd(ch) });
       },
       onInterim: (ch, text) => {
         send('stt:interim', { channel: ch, text });
@@ -631,9 +689,6 @@ function routeAudio(channel, pcmBuffer) {
   // Always run through VAD for speech state detection
   vad[channel].processChunk(buf);
 
-  // Keep pre-speech buffer
-  ringBuffers[channel].write(buf);
-
   if (streamingMode && streamingSTT[channel]) {
     // Streaming mode: send raw PCM directly to the WebSocket
     streamingSTT[channel].sendAudio(pcmBuffer);
@@ -652,6 +707,7 @@ async function setCapturing(active) {
 
   if (active) {
     sttDisabled = false; // reset on re-enable
+    batchSTT = null;     // a new session picks up the current keys and vocabulary
     const settings = store.getSettings();
     if ((settings.sttProvider || 'auto') === 'local') {
       try {
@@ -691,7 +747,7 @@ async function setCapturing(active) {
   stopStreamingSTT();
   buffers.you = []; buffers.them = [];
   vad.you.reset(); vad.them.reset();
-  ringBuffers.you.clear(); ringBuffers.them.clear();
+  batchSTT = null;
   // Surface a question that was asked right before listening stopped.
   clearTimeout(questionFlushTimer);
   addDetectedQuestions(questionDetector.flushPending());
@@ -735,9 +791,13 @@ async function runFeature(mode, userText) {
   if (!def) return;
   state.busy = true;
   let streamSettled = false; // drop stray tokens from a stream we've already abandoned
+  // One timing line per answer when CUE_PERF=1; a no-op otherwise.
+  let trace = null;
+  let traceStatus = 'ok';
   try {
     const settings = store.getSettings();
     const llm = createLLM(settings);
+    trace = createTrace('qna', { mode, provider: settings.provider, model: llm.model });
     const userBubble = def.userBubble !== null
       ? def.userBubble
       : (mode === 'ask' ? userText : mode === 'answerThis' ? `"${(userText || '').slice(0, 60)}${userText && userText.length > 60 ? '…' : ''}"` : null);
@@ -747,12 +807,9 @@ async function runFeature(mode, userText) {
     if (!llm.ready) {
       const message = llm.configurationError || ('Complete the ' + settings.provider + ' provider settings. Model: ' + (llm.model || 'unset') + '.');
       send('llm:error', { message });
+      traceStatus = 'not_configured';
       return;
     }
-
-    // Open the TCP+TLS connection to the provider now, in parallel with the
-    // screenshot below — by the time the request goes out, the socket is warm.
-    llm.warmup();
 
     const isQuickMode = !!settings.quick && (mode === 'ask' || mode === 'say' || mode === 'assist' || mode === 'answerThis');
     const isRecallOrSynthesis = /synthesis|synthesize|recommendation|conclusion|recap|summary|summarize|entire case|whole case|all findings|from (the )?beginning|earlier|previous|first question|what did (we|you) (say|calculate)/i.test(userText || '');
@@ -779,6 +836,14 @@ async function runFeature(mode, userText) {
 
     const needsScreenNow = def.needsScreen && !skipScreenForTextAsk && !recentThemTurn && !skipScreenForQuick;
 
+    // Open the TCP+TLS connection to the provider in parallel with the
+    // screenshot — by the time the request goes out, the socket is warm.
+    // Without a screenshot there is no head start to use: the request follows
+    // within a millisecond, so a warmup could only take an idle connection the
+    // request would otherwise have reused.
+    const warmAgeBefore = llm.warmAgeMs();
+    if (needsScreenNow) llm.warmup();
+
     // Kick off screen capture asynchronously so context & prompt assembly run in parallel
     const screenshotPromise = needsScreenNow
       ? (async () => {
@@ -802,15 +867,31 @@ async function runFeature(mode, userText) {
         })()
       : Promise.resolve(null);
 
-    // Assemble interview context and prompt while screenshot is in flight
-    const contextBlock = isQuickMode ? null : buildInterviewContext(settings, mode, transcript, userText, category);
+    // Assemble interview context and prompt while screenshot is in flight.
+    // The context comes in two parts: `fixed` (document, résumé, job
+    // description) opens the system prompt and is identical on every ask, so
+    // the provider can serve it from its prompt cache; `dynamic` is specific to
+    // this question's category and follows the instructions.
+    const contextParts = isQuickMode ? null : buildInterviewContextParts(settings, mode, transcript, userText, category);
     const system = isQuickMode
       ? QUICK_GOTCHA_SYSTEM
-      : (def.buildSystem ? def.buildSystem(contextBlock, settings.aiRules || '', settings) : (def.system || ''));
+      : (def.buildSystem ? def.buildSystem(contextParts, settings.aiRules || '', settings) : (def.system || ''));
+    const cachePrefixChars = contextParts && contextParts.fixed && system.startsWith(contextParts.fixed)
+      ? contextParts.fixed.length
+      : 0;
     const built = isQuickMode
       ? buildQuickTurn({ transcript, userText: userText || '' })
       : def.build({ transcript, userText: userText || '', chatHistory: chatHistory.all() });
     const imageDataUrl = await screenshotPromise;
+    if (needsScreenNow) trace.mark('screenshot');
+    trace.set('system_chars', system.length);
+    trace.set('cacheable_prefix_chars', cachePrefixChars);
+    trace.set('prompt_chars', built.length);
+    if (imageDataUrl) trace.set('image_kb', Math.round(imageDataUrl.length * 0.75 / 1024));
+    // How long ago this provider's connection was last opened or used. If
+    // first_token is consistently slower when this is large (or absent), the
+    // request is paying for a new connection.
+    trace.set('conn_age_ms', warmAgeBefore === null ? 'none' : warmAgeBefore);
 
     // Watchdog: a provider that stalls mid-stream would otherwise hang the await forever,
     // leaving state.busy = true and wedging every later question until an app restart.
@@ -832,9 +913,11 @@ async function runFeature(mode, userText) {
       send('llm:token', { text: t });
     });
     try {
+      trace.mark('request_sent');
       fullText = await Promise.race([
         llm.stream({
           system,
+          cachePrefixChars,
           turns: [...priorTurns, { role: 'user', text: built }],
           imageDataUrl,
           mode,
@@ -845,12 +928,20 @@ async function runFeature(mode, userText) {
             // then coalesce subsequent streaming deltas at 60fps.
             if (!firstTokenEmitted) {
               firstTokenEmitted = true;
+              trace.mark('first_token');
               tokens.flush();
             }
           },
           // Thought summaries and overload retries aren't visible text, but
           // they prove the provider is working — don't count them as a stall.
-          onActivity: () => { if (!streamSettled) rearm(); }
+          onActivity: () => { if (!streamSettled) rearm(); },
+          // cached_tokens > 0 means the provider reused the start of the prompt.
+          onUsage: (usage) => {
+            trace.set('prompt_tokens', usage.promptTokens);
+            trace.set('cached_tokens', usage.cachedTokens);
+            trace.set('output_tokens', usage.outputTokens);
+            trace.set('thought_tokens', usage.thoughtTokens);
+          }
         }),
         stalled
       ]);
@@ -868,106 +959,26 @@ async function runFeature(mode, userText) {
   } catch (e) {
     recordEvent({ level: 'error', event: 'llm_failed', msg: e && e.message ? e.message : String(e), frame: 'runFeature', context: { mode, provider: store.getSettings().provider } });
     send('llm:error', { message: e && e.message ? e.message : String(e) });
+    traceStatus = 'error';
   } finally {
     streamSettled = true;
     state.busy = false;
+    if (trace) trace.end(traceStatus);
   }
 }
 
 // -------- Live Notetaking (Free Local Ollama / Delta Notes) --------
-const PREFERRED_OLLAMA_MODELS = [
-  'qwen2.5:7b',
-  'qwen2.5:3b',
-  'llama3.1:8b',
-  'llama3.2:3b',
-  'llama3.2',
-  'llama3.1',
-  'qwen2.5',
-  'gemma2',
-  'mistral'
-];
+// Finding the local model (src/notes-engine.js) costs a round trip to Ollama;
+// the result is kept for the session and re-checked after any failure or
+// Settings change.
+const notesEngine = createNotesEngine();
 
-async function probeLocalOllamaModel(settings) {
-  const baseUrl = ((settings.apiKeys && settings.apiKeys.ollama) || 'http://localhost:11434').replace(/\/$/, '');
-  try {
-    const res = await fetch(`${baseUrl}/api/tags`, { signal: AbortSignal.timeout(900) });
-    if (!res.ok) return null;
-    const data = await res.json();
-    const installed = Array.isArray(data && data.models)
-      ? data.models.map((m) => m && m.name).filter((n) => typeof n === 'string' && !/embed/i.test(n))
-      : [];
-    if (!installed.length) return { running: true, model: null, baseUrl };
-
-    const configuredFast = settings.models && settings.models.ollama && settings.models.ollama.fast;
-    if (configuredFast) {
-      const exactOrTag = installed.find((n) => n === configuredFast || n === `${configuredFast}:latest` || n.startsWith(`${configuredFast}:`));
-      if (exactOrTag) return { running: true, model: exactOrTag, baseUrl };
-    }
-    for (const pref of PREFERRED_OLLAMA_MODELS) {
-      const match = installed.find((n) => n === pref || n === `${pref}:latest` || n.startsWith(`${pref}:`));
-      if (match) return { running: true, model: match, baseUrl };
-    }
-    return { running: true, model: installed[0], baseUrl };
-  } catch (_) {
-    return null;
-  }
-}
-
-function preloadLocalOllamaModel(baseUrl, model) {
-  if (!baseUrl || !model) return;
-  fetch(`${baseUrl.replace(/\/$/, '')}/api/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model,
-      messages: [],
-      keep_alive: '30m',
-      options: { num_ctx: 2048 }
-    })
-  }).catch(() => {});
-}
-
-async function resolveNotesLLM(settings) {
-  // Notes Mode uses 100% Free Local Ollama exclusively (never consumes cloud API keys)
-  const ollamaProbe = await probeLocalOllamaModel(settings);
-  if (ollamaProbe && ollamaProbe.model) {
-    const ollamaSettings = {
-      provider: 'ollama',
-      smart: false,
-      quick: false,
-      apiKeys: { ollama: ollamaProbe.baseUrl },
-      models: {
-        ollama: { fast: ollamaProbe.model, smart: ollamaProbe.model }
-      }
-    };
-    return {
-      llm: createLLM(ollamaSettings),
-      label: `Ollama · ${ollamaProbe.model} (Free Local)`,
-      isLocal: true,
-      ready: true,
-      ollamaBaseUrl: ollamaProbe.baseUrl,
-      ollamaModel: ollamaProbe.model
-    };
-  }
-
-  if (ollamaProbe && ollamaProbe.running) {
-    return {
-      llm: { ready: false },
-      label: 'Ollama (No model — run `ollama pull qwen2.5:7b`)',
-      isLocal: true,
-      ready: false,
-      error: 'Ollama is running, but no local model was found. Run: ollama pull qwen2.5:7b'
-    };
-  }
-
-  return {
-    llm: { ready: false },
-    label: 'Ollama offline (Free Local LLM)',
-    isLocal: true,
-    ready: false,
-    error: 'Local Ollama is offline. Start the Ollama application on your PC to generate free notes.'
-  };
-}
+// How often streamed notes text is pushed to the editor. Each push rewrites a
+// textarea and forces it to lay out again, which costs a few milliseconds on a
+// long document (measured: 2–4ms at 10,000 characters, about 10ms at 40,000),
+// and that cost does not shrink by appending instead of replacing. Ten updates
+// a second reads as continuous; the first token is still shown immediately.
+const NOTES_TOKEN_INTERVAL_MS = 100;
 
 function hasSubstantiveSpeech(turns) {
   if (!Array.isArray(turns) || turns.length === 0) return false;
@@ -994,9 +1005,13 @@ async function runNotesUpdate(opts = {}) {
   let streamSettled = false;
   let watchdog = null;
   const abortCtrl = new AbortController();
+  // One timing line per notes update when CUE_PERF=1; a no-op otherwise.
+  const trace = createTrace('notes', { task, auto: isAuto ? 1 : 0 });
+  let traceStatus = 'skipped';
   try {
     const settings = store.getSettings();
-    const notesLLM = await resolveNotesLLM(settings);
+    const notesLLM = await notesEngine.resolve(settings);
+    trace.mark('engine_ready');
     notesState.engineLabel = notesLLM.label;
 
     if (!notesLLM.ready || !notesLLM.llm || !notesLLM.llm.ready) {
@@ -1005,21 +1020,34 @@ async function runNotesUpdate(opts = {}) {
           message: notesLLM.error || 'Local Ollama is offline. Start Ollama to generate free notes without using your API quota.'
         });
       }
+      traceStatus = 'engine_unavailable';
       return;
     }
     const { llm, label } = notesLLM;
+    trace.set('model', notesLLM.ollamaModel);
 
     const forceFull = !!opts.forceFull;
-    const turnSnapshotCount = transcript.length;
-    const isDelta = !forceFull && !!notesState.markdown && turnSnapshotCount > notesState.lastTurnIndex;
-    const deltaCount = isDelta ? (turnSnapshotCount - notesState.lastTurnIndex) : turnSnapshotCount;
+    // What this request covers. `budget` keeps the prompt inside the local
+    // model's context window; a backlog too long for one request is worked
+    // through oldest-first, and `plan.endIndex` is how far this one gets.
+    const budget = notesBudget(settings.notesContextTokens);
+    const plan = planNotesUpdate({
+      transcript,
+      notes: notesState.markdown,
+      lastTurnIndex: notesState.lastTurnIndex,
+      task,
+      forceFull,
+      budget
+    });
+    const turnSnapshotCount = plan.endIndex;
+    const deltaCount = plan.isDelta ? (turnSnapshotCount - notesState.lastTurnIndex) : turnSnapshotCount;
 
-    if (task === 'update' && notesState.markdown && transcript.length > 0 && turnSnapshotCount <= notesState.lastTurnIndex && !forceFull) {
+    if (task === 'update' && notesState.markdown && transcript.length > 0 && transcript.length <= notesState.lastTurnIndex && !forceFull) {
       if (!isAuto) send('notes:error', { message: 'No new speech since last update.' });
       return;
     }
 
-    if (task === 'update' && isDelta) {
+    if (task === 'update' && plan.isDelta) {
       const newTurns = transcript.slice(notesState.lastTurnIndex);
       if (!hasSubstantiveSpeech(newTurns)) {
         if (!isAuto) send('notes:error', { message: 'Not enough new speech since last update.' });
@@ -1033,12 +1061,21 @@ async function runNotesUpdate(opts = {}) {
       previousNotes: forceFull ? '' : notesState.markdown,
       lastTurnIndex: forceFull ? 0 : notesState.lastTurnIndex,
       task,
-      timeLabel
+      timeLabel,
+      maxNotesChars: budget.maxNotesChars,
+      maxSpeechChars: budget.maxSpeechChars,
+      appendOnly: plan.appendOnly
     });
+    trace.set('context_tokens', budget.contextTokens);
+    trace.set('prompt_chars', promptText.length);
+    trace.set('notes_chars', notesState.markdown.length);
+    trace.set('turns', turnSnapshotCount - (plan.isDelta ? notesState.lastTurnIndex : 0));
 
+    // `isDelta` tells the editor whether the result is added below the notes
+    // (true) or replaces them (false).
     send('notes:start', {
       engineLabel: label,
-      isDelta,
+      isDelta: plan.appends,
       isAuto,
       totalTurns: turnSnapshotCount,
       deltaTurns: deltaCount,
@@ -1061,26 +1098,40 @@ async function runNotesUpdate(opts = {}) {
       if (streamSettled) return;
       rearm();
       send('notes:token', { text: t });
-    });
+    }, NOTES_TOKEN_INTERVAL_MS);
 
     try {
+      trace.mark('request_sent');
+      traceStatus = 'ok';
       fullText = await Promise.race([
         llm.stream({
           system: LIVE_NOTES_SYSTEM,
           turns: [{ role: 'user', text: promptText }],
           imageDataUrl: null,
           mode: 'recap',
-          maxTokens: 900,
+          // A rewrite needs room for the whole document; an added section does not.
+          maxTokens: notesOutputTokens(task, { rewrite: !plan.appends }),
           signal: abortCtrl.signal,
           onToken: (t) => {
             if (streamSettled) return;
             tokens.push(t);
             if (!firstTokenEmitted) {
               firstTokenEmitted = true;
+              trace.mark('first_token');
               tokens.flush();
             }
           },
-          onActivity: () => { if (!streamSettled) rearm(); }
+          onActivity: () => { if (!streamSettled) rearm(); },
+          // Ollama's own counters. prompt_eval_ms is the time spent reading the
+          // prompt: it should fall sharply on repeat updates, when the notes at
+          // the start of the prompt are still in the model's cache.
+          onUsage: (usage) => {
+            trace.set('prompt_tokens', usage.promptTokens);
+            trace.set('prompt_eval_ms', usage.promptEvalMs);
+            trace.set('output_tokens', usage.outputTokens);
+            trace.set('eval_ms', usage.evalMs);
+            trace.set('load_ms', usage.loadMs);
+          }
         }),
         stalled
       ]);
@@ -1092,8 +1143,8 @@ async function runNotesUpdate(opts = {}) {
     }
 
     if (typeof fullText === 'string' && fullText.trim()) {
-      const merged = mergeNotesSection(notesState.markdown, fullText.trim(), task, isDelta);
-      if (merged === notesState.markdown && notesState.markdown.length > 0) {
+      const merged = mergeNotesSection(notesState.markdown, fullText.trim(), task, plan.appends);
+      if (merged === notesState.markdown.trim() && notesState.markdown.length > 0) {
         if (task === 'update') {
           notesState.lastTurnIndex = turnSnapshotCount;
         }
@@ -1114,6 +1165,10 @@ async function runNotesUpdate(opts = {}) {
     }
     send('notes:done', getNotesPublicState());
   } catch (e) {
+    // The remembered engine may be the problem (Ollama stopped, model
+    // removed), so look for it again next time.
+    notesEngine.invalidate();
+    traceStatus = 'error';
     if (!isAuto) send('notes:error', { message: e && e.message ? e.message : String(e) });
   } finally {
     streamSettled = true;
@@ -1121,6 +1176,7 @@ async function runNotesUpdate(opts = {}) {
     abortCtrl.abort();
     notesState.busy = false;
     send('notes:state', getNotesPublicState());
+    trace.end(traceStatus);
   }
 }
 
@@ -1154,6 +1210,9 @@ ipcMain.handle('settings:get', () => store.getSettings());
 ipcMain.handle('prompts:coding-default', () => LEETCODE_DEFAULT_INSTRUCTIONS);
 ipcMain.handle('settings:set', (_e, patch) => {
   sttDisabled = false;
+  // Keys, models, vocabulary sources and the Ollama URL can all have changed.
+  batchSTT = null;
+  notesEngine.invalidate();
   const updated = store.setSettings(patch);
   if (phoneCompanion) {
     phoneCompanion.broadcast('smart:state', { smart: !!updated.smart });
@@ -1244,10 +1303,13 @@ ipcMain.handle('notes:mode', async (_e, active) => {
     // Probe local Ollama right when entering Notes mode so the badge shows the active engine
     // and pre-warm the model into VRAM so the first click starts streaming immediately.
     try {
-      const { label, ollamaBaseUrl, ollamaModel } = await resolveNotesLLM(store.getSettings());
+      // Always a fresh look when the mode is entered: Ollama may have been
+      // started or stopped since the last time.
+      notesEngine.invalidate();
+      const { label, ollamaBaseUrl, ollamaModel, contextTokens } = await notesEngine.resolve(store.getSettings());
       notesState.engineLabel = label;
       if (ollamaBaseUrl && ollamaModel) {
-        preloadLocalOllamaModel(ollamaBaseUrl, ollamaModel);
+        preloadLocalOllamaModel(ollamaBaseUrl, ollamaModel, contextTokens);
       }
     } catch (_) {}
   }
@@ -1678,10 +1740,3 @@ app.on('will-quit', () => {
   if (localWhisperTranscriber) localWhisperTranscriber.forceStop().catch(() => {});
 });
 app.on('window-all-closed', () => app.quit());
-
-app.on('will-quit', () => { globalShortcut.unregisterAll(); });
-app.on('window-all-closed', (e) => {
-  // Don't quit while the permissions window is open — the user may be in System Settings
-  if (permWin) { e.preventDefault(); return; }
-  app.quit();
-});
