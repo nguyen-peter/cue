@@ -10,7 +10,10 @@ const {
   formatNotesForEditor,
   deduplicateBullets,
   extractExistingQuestions,
-  stripQuestionsSections,
+  selectNotesWindow,
+  notesBudget,
+  notesOutputTokens,
+  planNotesUpdate,
   countTranscriptWords,
   shouldAutoUpdateNotes,
   AUTO_NOTES_TURN_THRESHOLD,
@@ -220,7 +223,7 @@ test('formatNotesForEditor cleans double bullet markers, backticks, and markdown
   assert.ok(!formatted.includes('- - '));
 });
 
-test('extractExistingQuestions and stripQuestionsSections isolate prior questions from prompt context', () => {
+test('extractExistingQuestions collects prior questions from every questions section', () => {
   const notes = [
     '📌 Discussion Update (1:29 PM):',
     '- Action: Write to temporary file.',
@@ -237,15 +240,9 @@ test('extractExistingQuestions and stripQuestionsSections isolate prior question
   assert.strictEqual(questions.length, 2);
   assert.strictEqual(questions[0], 'How will the application handle failure during publish?');
   assert.strictEqual(questions[1], 'Can you provide details on the temporary file mechanism?');
-
-  const stripped = stripQuestionsSections(notes);
-  assert.ok(!stripped.includes('How will the application handle failure'));
-  assert.ok(!stripped.includes('❓ Questions to Ask'));
-  assert.ok(stripped.includes('Write to temporary file.'));
-  assert.ok(stripped.includes('Remove dataframe retention code.'));
 });
 
-test('buildLiveNotesPrompt injects anti-repetition blacklist and strips old questions', () => {
+test('buildLiveNotesPrompt injects the anti-repetition blacklist for earlier questions', () => {
   const notes = [
     '📌 Discussion Update (1:29 PM):',
     '- Action: Write to temporary file.',
@@ -351,4 +348,192 @@ test('shouldAutoUpdateNotes triggers at turn threshold or word threshold', () =>
     pendingTurns: longMonologue.length,
     pendingWords: countTranscriptWords(longMonologue)
   }), true);
+});
+// ── Regression: notes must never silently lose content ──────────────────────
+
+test('a full rewrite of typed notes keeps every heading and every carried-over line', () => {
+  const current = '- Redis for session storage\n- Postgres is the primary database';
+  const rewrite = [
+    '📌 Summary & How It Connects:',
+    '- Redis for session storage',
+    '- Postgres is the primary database',
+    '- Sessions are cached in Redis while durable data lives in Postgres',
+    '',
+    '💡 Key Insights & Technical Breakdown:',
+    '- Redis keeps data in memory which makes lookups fast',
+    '',
+    '❓ Follow-Up Questions to Ask:',
+    '- What is the eviction policy?'
+  ].join('\n');
+
+  // Not a delta: the model output replaces the notes, so nothing may be
+  // "deduplicated" against the text it replaces.
+  assert.strictEqual(mergeNotesSection(current, rewrite, 'update', false), rewrite);
+});
+
+test('deduplicateBullets keeps every heading that still has a bullet under it', () => {
+  const existing = '📌 Live Summary:\n- The team is migrating schedules to blob storage.';
+  const chunk = [
+    '📌 Discussion Update (2:00 PM):',
+    '- The team is migrating schedules to blob storage.',
+    '- Decision: the hot tier is used for the first ninety days.',
+    '',
+    '✅ Action Items:',
+    '- Action: Priya writes the rollback runbook.'
+  ].join('\n');
+
+  const kept = deduplicateBullets(existing, chunk);
+  assert.ok(kept.includes('📌 Discussion Update (2:00 PM):'));
+  assert.ok(kept.includes('✅ Action Items:'), 'second heading must survive');
+  assert.ok(kept.includes('hot tier'));
+  assert.ok(kept.includes('rollback runbook'));
+  assert.ok(!kept.includes('- The team is migrating schedules to blob storage.'), 'the true duplicate is dropped');
+});
+
+test('deduplicateBullets drops a heading whose bullets were all duplicates', () => {
+  const existing = '- Use Redis for the session cache.';
+  const chunk = '📌 Discussion Update (2:00 PM):\n- Use Redis for the session cache.\n\n✅ Action Items:\n- Action: Sam benchmarks the eviction policy.';
+  const kept = deduplicateBullets(existing, chunk);
+  assert.ok(!kept.includes('Discussion Update'));
+  assert.ok(kept.startsWith('✅ Action Items:'));
+});
+
+test('a bullet that restates an older point but adds facts is kept', () => {
+  const kept = mergeNotesSection(
+    '📌 Discussion Update (1:00 PM):\n- Use Redis cache',
+    '📌 Discussion Update (1:05 PM):\n- Decision: use Redis cache for session tokens with a 15 minute TTL and LRU eviction',
+    'update',
+    true
+  );
+  assert.ok(kept.includes('15 minute TTL'), 'new detail must not be discarded as a duplicate');
+
+  const withOwner = mergeNotesSection(
+    '📌 Discussion Update (1:00 PM):\n- Migrate schedules to blob storage',
+    '📌 Discussion Update (1:05 PM):\n- Action: Priya will migrate schedules to blob storage by Friday using the hot tier',
+    'update',
+    true
+  );
+  assert.ok(withOwner.includes('Priya'), 'owner and deadline are new information');
+});
+
+test('a bullet that only repeats part of an older, fuller point is still dropped', () => {
+  const existing = '- Decision: use Redis cache for session tokens with a 15 minute TTL and LRU eviction';
+  assert.strictEqual(deduplicateBullets(existing, '📌 Discussion Update (1:10 PM):\n- Use Redis cache for session tokens'), '');
+});
+
+test('a changed number is new information, not a duplicate', () => {
+  const kept = deduplicateBullets('- The cache TTL is 15 minutes', '📌 Discussion Update (1:10 PM):\n- The cache TTL is 30 minutes');
+  assert.ok(kept.includes('30 minutes'));
+});
+
+test('output with no bullets at all is kept rather than reported as nothing new', () => {
+  const prose = 'The team agreed to move the schedule export to blob storage next sprint.';
+  assert.strictEqual(deduplicateBullets('- Something unrelated that was already noted.', prose), prose);
+});
+
+// ── Context budget and cache-friendly prompt shape ──────────────────────────
+
+test('notesBudget scales with the context size and never drops below the default', () => {
+  const small = notesBudget(4096);
+  const large = notesBudget(8192);
+  assert.strictEqual(notesBudget(1000).contextTokens, 4096);
+  assert.strictEqual(notesBudget(undefined).contextTokens, 4096);
+  assert.ok(large.maxNotesChars > small.maxNotesChars);
+  assert.ok(large.maxSpeechChars > small.maxSpeechChars);
+  // Worst case must fit the window at ~3.5 characters per token.
+  const worstCaseTokens = (small.maxNotesChars + small.maxSpeechChars) / 3.5 + 850 + notesOutputTokens('update', { rewrite: true });
+  assert.ok(worstCaseTokens <= 4096, `worst case ${worstCaseTokens} tokens exceeds the window`);
+});
+
+test('notesOutputTokens gives each task its own cap', () => {
+  assert.ok(notesOutputTokens('questions') < notesOutputTokens('insights'));
+  assert.ok(notesOutputTokens('insights') <= notesOutputTokens('update'));
+  assert.ok(notesOutputTokens('update', { rewrite: true }) >= notesOutputTokens('update'));
+});
+
+test('selectNotesWindow keeps short notes whole and bounds long ones on a line start', () => {
+  assert.deepStrictEqual(selectNotesWindow('short notes', 100), { text: 'short notes', truncated: false });
+  const lines = Array.from({ length: 200 }, (_, i) => `- Point number ${i} about the design`);
+  const window = selectNotesWindow(lines.join('\n'), 1000);
+  assert.strictEqual(window.truncated, true);
+  assert.ok(window.text.length <= 1000);
+  assert.ok(window.text.startsWith('- Point number'), 'window starts on a whole line');
+  assert.ok(window.text.endsWith(lines[lines.length - 1]), 'the newest notes are always included');
+});
+
+test('the notes window only moves in large steps, so appended notes extend the previous prompt', () => {
+  const lines = Array.from({ length: 200 }, (_, i) => `- Point number ${i} about the design`);
+  let notes = lines.join('\n');
+  const before = selectNotesWindow(notes, 1000).text;
+  notes += '\n- One freshly appended bullet';
+  const after = selectNotesWindow(notes, 1000).text;
+  assert.ok(after.startsWith(before), 'a small append must not shift the start of the window');
+});
+
+test('a long notes document yields a bounded prompt', () => {
+  const budget = notesBudget(4096);
+  const bigNotes = Array.from({ length: 400 }, (_, i) => `- Point number ${i} about the architecture decision and its tradeoffs`).join('\n');
+  const speech = Array.from({ length: 12 }, (_, i) => ({ channel: i % 2 ? 'you' : 'them', text: `Spoken turn number ${i} with some content.`, ts: i }));
+  const prompt = buildLiveNotesPrompt({
+    transcript: speech, previousNotes: bigNotes, lastTurnIndex: 4, task: 'update',
+    maxNotesChars: budget.maxNotesChars, maxSpeechChars: budget.maxSpeechChars
+  });
+  assert.ok(bigNotes.length > 20000);
+  assert.ok(prompt.length < budget.maxNotesChars + budget.maxSpeechChars + 2000);
+  assert.ok(prompt.includes('(Earlier notes omitted'));
+  assert.ok(prompt.includes('Point number 399'), 'newest notes are present');
+  assert.ok(!prompt.includes('Point number 0 '), 'oldest notes are outside the window');
+});
+
+test('update, insights and questions prompts share the same opening (cache prefix)', () => {
+  const notes = '📌 Live Summary:\n- Launching Friday.\n\n❓ Questions to Ask (1:00 PM):\n- Who owns the rollback?';
+  const extended = [...transcript, { channel: 'them', text: 'Also enable mTLS on the gateway.', ts: 4 }];
+  const base = { transcript: extended, previousNotes: notes, lastTurnIndex: 3, timeLabel: '1:05 PM' };
+  const opening = '=== CURRENT NOTES IN EDITOR ===\n' + notes + '\n\n';
+  for (const task of ['update', 'insights', 'questions']) {
+    const prompt = buildLiveNotesPrompt({ ...base, task });
+    assert.ok(prompt.startsWith(opening), `${task} prompt must open with the unchanged notes`);
+  }
+});
+
+test('prompts join consecutive fragments from the same speaker into one line', () => {
+  const fragments = [
+    { channel: 'them', text: 'So the plan is', ts: 1 },
+    { channel: 'them', text: 'to ship on Friday.', ts: 2 },
+    { channel: 'you', text: 'Understood.', ts: 3 }
+  ];
+  const prompt = buildLiveNotesPrompt({ transcript: fragments, previousNotes: '', lastTurnIndex: 0 });
+  assert.ok(prompt.includes('Them: So the plan is to ship on Friday.'));
+  assert.strictEqual(prompt.split('Them:').length - 1, 1, 'one line for the speaker, not one per fragment');
+});
+
+test('planNotesUpdate works through a long backlog in slices instead of one oversized prompt', () => {
+  const budget = notesBudget(4096);
+  const backlog = Array.from({ length: 200 }, (_, i) => ({ channel: 'them', text: 'word '.repeat(40) + i, ts: i }));
+  const plan = planNotesUpdate({ transcript: backlog, notes: '- existing note', lastTurnIndex: 10, task: 'update', budget });
+  assert.strictEqual(plan.appends, true);
+  assert.ok(plan.endIndex > 10 && plan.endIndex < backlog.length, 'stops early and leaves the rest pending');
+
+  const prompt = buildLiveNotesPrompt({
+    transcript: backlog.slice(0, plan.endIndex), previousNotes: '- existing note', lastTurnIndex: 10, task: 'update',
+    maxNotesChars: budget.maxNotesChars, maxSpeechChars: budget.maxSpeechChars
+  });
+  assert.ok(prompt.includes(backlog[10].text.trim()), 'the oldest pending turn is covered first');
+  assert.ok(prompt.includes(backlog[plan.endIndex - 1].text.trim()), 'every turn up to endIndex is in the prompt');
+});
+
+test('planNotesUpdate covers everything when it fits, and rewrites only short typed notes', () => {
+  const budget = notesBudget(4096);
+  const plan = planNotesUpdate({ transcript, notes: '- note', lastTurnIndex: 1, task: 'update', budget });
+  assert.deepStrictEqual({ endIndex: plan.endIndex, appends: plan.appends }, { endIndex: 3, appends: true });
+
+  const short = planNotesUpdate({ transcript: [], notes: 'snyk, wiz, elastic', lastTurnIndex: 0, task: 'update', budget });
+  assert.strictEqual(short.appends, false, 'short typed notes are rewritten in place');
+
+  const longNotes = '- a typed line of notes\n'.repeat(400);
+  const long = planNotesUpdate({ transcript: [], notes: longNotes, lastTurnIndex: 0, task: 'update', budget });
+  assert.strictEqual(long.appendOnly, true);
+  assert.strictEqual(long.appends, true, 'long typed notes get a section added, never replaced by a truncated copy');
+  const prompt = buildLiveNotesPrompt({ transcript: [], previousNotes: longNotes, task: 'update', appendOnly: true, maxNotesChars: budget.maxNotesChars });
+  assert.ok(prompt.includes('Task — SUMMARIZE & CONNECT THE NOTES (INCREMENTAL):'));
 });
