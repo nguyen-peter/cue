@@ -226,10 +226,14 @@
   }
 
   // ---- actions -----------------------------------------------------------
-  function runMode(mode, text) {
+  // `contextTs` (optional): answer from the conversation as it stood at that
+  // transcript timestamp instead of the live tail.
+  function runMode(mode, text, contextTs) {
     if (busy) return;
     setBusy(true);
-    cue.ask({ mode, text: text || '' });
+    const payload = { mode, text: text || '' };
+    if (Number.isFinite(contextTs)) payload.contextTs = contextTs;
+    cue.ask(payload);
   }
 
   document.querySelectorAll('.act').forEach((btn) => {
@@ -699,6 +703,8 @@
     const qqEl = document.getElementById('question-queue');
     if (messagesEl) messagesEl.classList.toggle('hidden', notesModeActive);
     if (notesModeActive && qqEl) qqEl.classList.add('hidden');
+    // Leaving Notes: show the questions that were heard in the meantime.
+    else if (!notesModeActive) renderQuestionQueue();
   }
 
   function resetNotesActionLabels() {
@@ -1255,7 +1261,7 @@
   }
 
   // ---- Click conversation history turn to instantly ask it to chat ----
-  function askHistoryQuestion(rawText) {
+  function askHistoryQuestion(rawText, contextTs) {
     const text = (rawText || '').trim();
     if (!text || text.length < 2) return;
     if (busy) {
@@ -1267,9 +1273,28 @@
       if (typeof cue.notesModeSet === 'function') cue.notesModeSet(false).catch(() => {});
     }
     hardClearSTTFill();
-    runMode('ask', text);
+    runMode('ask', text, contextTs);
   }
 
+  // The sentence nearest to a click that landed inside a row but not on any
+  // sentence (row padding, the gap between wrapped lines).
+  function nearestSentence(row, x, y) {
+    let best = null;
+    let bestDist = Infinity;
+    row.querySelectorAll('.ts-sent').forEach((el) => {
+      for (const r of el.getClientRects()) {
+        const dx = x < r.left ? r.left - x : (x > r.right ? x - r.right : 0);
+        const dy = y < r.top ? r.top - y : (y > r.bottom ? y - r.bottom : 0);
+        const d = dx * dx + dy * dy;
+        if (d < bestDist) { bestDist = d; best = el; }
+      }
+    });
+    return best;
+  }
+
+  // Click a sentence to ask just that sentence; click the speaker label to ask
+  // the whole row. Either way the answer is built from the conversation as it
+  // stood when that line was said, not from what is being said now.
   const tsListEl = document.getElementById('ts-list');
   if (tsListEl) {
     tsListEl.addEventListener('click', (e) => {
@@ -1280,10 +1305,19 @@
       const turn = e.target.closest('.ts-turn');
       if (!turn) return;
 
+      const wholeRow = !!e.target.closest('.ts-channel');
+      const sentence = wholeRow ? null : (e.target.closest('.ts-sent') || nearestSentence(turn, e.clientX, e.clientY));
+      if (sentence) {
+        askHistoryQuestion(sentence.textContent, Number(sentence.dataset.ts));
+        return;
+      }
+      // Speaker label, or the live (still changing) row, which has no
+      // sentences yet: the row's full text.
       const txt = turn.querySelector('.ts-text');
       const textToAsk = (txt ? txt.textContent : turn.textContent.replace(/^(Them|You)\s*/i, '')).trim();
       if (textToAsk && textToAsk.length >= 2) {
-        askHistoryQuestion(textToAsk);
+        const turns = turn._turns;
+        askHistoryQuestion(textToAsk, turns && turns.length ? turns[turns.length - 1].ts : undefined);
       }
     });
   }
@@ -1293,7 +1327,48 @@
     return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
   }
 
-  function appendTranscriptHistoryTurn(channel, text, isInterim) {
+  // Draw a history row's text as one span per sentence, so a single sentence
+  // can be hovered and clicked. Each span carries the timestamp of the
+  // transcript turn its sentence ends in. On "Them" rows, sentences the
+  // question detector would pick up get a marker.
+  function renderRowSentences(row, channel) {
+    const txt = row.querySelector('.ts-text');
+    const turns = row._turns || [];
+    if (!txt || !turns.length) return;
+    const joined = turns.map((t) => t.text).join(' ');
+    let sentences = [];
+    try { sentences = cue.splitSentences(joined); } catch (_) {}
+    if (!sentences || !sentences.length) sentences = [joined];
+
+    // Offsets (in `joined`) at which each turn ends.
+    const turnEnds = [];
+    let offset = 0;
+    turns.forEach((t, i) => { offset += t.text.length + (i ? 1 : 0); turnEnds.push(offset); });
+
+    txt.textContent = '';
+    let pos = 0;
+    sentences.forEach((sentence, i) => {
+      const at = joined.indexOf(sentence, pos);
+      pos = (at === -1 ? pos : at) + sentence.length;
+      let turnIndex = turnEnds.findIndex((end) => pos <= end);
+      if (turnIndex === -1) turnIndex = turns.length - 1;
+
+      const span = document.createElement('span');
+      span.className = 'ts-sent';
+      span.textContent = sentence;
+      const ts = turns[turnIndex].ts;
+      if (Number.isFinite(ts)) span.dataset.ts = String(ts);
+      if (channel === 'them') {
+        let isQuestion = false;
+        try { isQuestion = cue.isQuestionSentence(sentence); } catch (_) {}
+        if (isQuestion) span.classList.add('ts-q');
+      }
+      if (i) txt.appendChild(document.createTextNode(' '));
+      txt.appendChild(span);
+    });
+  }
+
+  function appendTranscriptHistoryTurn(channel, text, isInterim, ts) {
     const list = document.getElementById('ts-list');
     if (!list) return;
 
@@ -1329,10 +1404,8 @@
 
       if (useExisting) {
         // Append to existing row — accumulates sentence fragments
-        const txt = existingRow.querySelector('.ts-text');
-        if (txt) {
-          txt.textContent = txt.textContent ? txt.textContent + ' ' + text : text;
-        }
+        existingRow._turns.push({ text, ts });
+        renderRowSentences(existingRow, channel);
       } else {
         // Start a new row (no buttons — just clean history view)
         const row = document.createElement('div');
@@ -1344,10 +1417,11 @@
 
         const txt = document.createElement('span');
         txt.className = 'ts-text';
-        txt.textContent = text;
 
         row.appendChild(chLabel);
         row.appendChild(txt);
+        row._turns = [{ text, ts }];
+        renderRowSentences(row, channel);
         list.appendChild(row);
         tsLastRow[channel] = row;
       }
@@ -1545,9 +1619,9 @@
     if (!aiEl) startAi(true);
     aiRaw = message; finalizeAi(); setBusy(false);
   });
-  cue.on('transcript', ({ channel, text }) => {
+  cue.on('transcript', ({ channel, text, ts }) => {
     if (!text || text.trim().length < 2 || /^[?!.,;:\-…]+$/.test(text.trim())) return;
-    appendTranscriptHistoryTurn(channel, text, false);
+    appendTranscriptHistoryTurn(channel, text, false, ts);
   });
 
   // ---- Auto-copy on text selection + native Ctrl+C clipboard bridge --------
@@ -1597,7 +1671,8 @@
   const qqHint = document.getElementById('qq-hint');
   const qqToggleBtn = document.getElementById('qq-toggle-btn');
   const qqAddInput = document.getElementById('qq-add-input');
-  let questionItems = []; // mirror of main's queue: [{ id, text, pinned }]
+  let questionItems = []; // mirror of main's queue: [{ id, text, pinned, category? }]
+  const QQ_CATEGORY_LABELS = { compensation: 'pay' };
   let qqForced = false;   // user toggled the strip open (survives an empty queue)
   if (qqHint) qqHint.textContent = (isMac ? '⌘⌥1–4' : 'Ctrl+Alt+1–4') + ' · click to answer';
   if (qqToggleBtn) qqToggleBtn.innerHTML = icon('list-plus', { size: 15 });
@@ -1610,7 +1685,9 @@
     // stays exactly as slim as before.
     const addRow = qqPanel.querySelector('.qq-add');
     if (addRow) addRow.classList.toggle('hidden', !qqForced);
-    if (!questionItems.length && !qqForced) { qqPanel.classList.add('hidden'); return; }
+    // Detection keeps running in Notes mode, but the strip stays out of the
+    // way there; it shows what was heard as soon as Notes mode is left.
+    if ((!questionItems.length || notesModeActive) && !qqForced) { qqPanel.classList.add('hidden'); return; }
     qqPanel.classList.remove('hidden');
     questionItems.forEach((item, i) => {
       const row = document.createElement('div');
@@ -1652,6 +1729,12 @@
       row.appendChild(key);
       if (pinEl) row.appendChild(pinEl);
       row.appendChild(txt);
+      if (item.category) {
+        const cat = document.createElement('span');
+        cat.className = 'qq-cat';
+        cat.textContent = QQ_CATEGORY_LABELS[item.category] || item.category;
+        row.appendChild(cat);
+      }
       row.appendChild(edit);
       row.appendChild(dismiss);
       row.addEventListener('click', () => cue.questionAnswer(item.id));

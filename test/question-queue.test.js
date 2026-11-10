@@ -86,6 +86,39 @@ test('removeById and clear behave and report change correctly', () => {
   assert.equal(q.clear(), true);
 });
 
+test('a category is carried on the item only when one is given', () => {
+  const q = makeQueue();
+  q.addDetected('Tell me about a conflict.', 'behavioral');
+  q.addPinned('What is a mutex?');
+  const [a, b] = q.items();
+  assert.equal(a.category, 'behavioral');
+  assert.equal('category' in b, false);
+});
+
+test('replaceDetected updates a detected question in place', () => {
+  const q = makeQueue();
+  q.addDetected('What is REST?', 'technical');
+  q.addDetected('Why this company?');
+  const before = q.items();
+  assert.equal(q.replaceDetected('What is REST?', 'What is REST? And how does it differ from GraphQL?', 'technical'), true);
+  const after = q.items();
+  assert.equal(after.length, 2);
+  assert.equal(after[0].id, before[0].id, 'same slot and id');
+  assert.equal(after[0].text, 'What is REST? And how does it differ from GraphQL?');
+  assert.equal(q.addDetected('What is REST? And how does it differ from GraphQL?'), false, 'new text is deduped');
+});
+
+test('replaceDetected refuses when the original is gone, pinned, or the new text is queued', () => {
+  const q = makeQueue();
+  assert.equal(q.replaceDetected('What is REST?', 'What is REST? And SOAP?'), false);
+  q.addPinned('What is REST?');
+  assert.equal(q.replaceDetected('What is REST?', 'What is REST? And SOAP?'), false);
+  q.addDetected('Why this company?');
+  q.addDetected('Why this role?');
+  assert.equal(q.replaceDetected('Why this company?', 'Why this role?'), false);
+  assert.deepEqual(q.items().map((i) => i.text), ['What is REST?', 'Why this company?', 'Why this role?']);
+});
+
 test('blank or unnormalizable text is rejected', () => {
   const q = makeQueue();
   assert.equal(q.addPinned('   '), false);

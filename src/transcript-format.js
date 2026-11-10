@@ -54,4 +54,17 @@ function countTurnsWithinBudget(turns, maxChars, { fromEnd = false } = {}) {
   return count;
 }
 
-module.exports = { speakerLabel, mergeSpeakerTurns, formatTurns, countTurnsWithinBudget };
+// The conversation as it stood at a past moment: every turn up to and
+// including the one stamped `ts`. Used when the user asks about an earlier
+// line from the history, so the answer is built from what had been said by
+// then rather than from whatever is being said now. Without a usable `ts`
+// the whole transcript is returned unchanged.
+function transcriptThrough(transcript, ts) {
+  const turns = Array.isArray(transcript) ? transcript : [];
+  if (typeof ts !== 'number' || !Number.isFinite(ts)) return turns;
+  let end = turns.length;
+  while (end > 0 && !(turns[end - 1] && turns[end - 1].ts <= ts)) end -= 1;
+  return end === turns.length ? turns : turns.slice(0, end);
+}
+
+module.exports = { speakerLabel, mergeSpeakerTurns, formatTurns, countTurnsWithinBudget, transcriptThrough };

@@ -29,19 +29,39 @@ function createQuestionQueue({ max = 4, normalize = (s) => String(s || '').trim(
     return true;
   }
 
-  function add(text, pinned) {
+  // `category` is an optional label (behavioral, technical, …) shown next to
+  // the question; the queue only carries it.
+  function add(text, pinned, category) {
     const clean = String(text || '').trim();
     if (!clean) return false;
     const norm = normalize(clean);
     if (!norm || has(norm)) return false;
     if (!evictFor(pinned)) return false;
-    items.push({ id: nextId++, text: clean, norm, pinned: !!pinned });
+    const item = { id: nextId++, text: clean, norm, pinned: !!pinned };
+    if (category) item.category = category;
+    items.push(item);
     return true;
   }
 
   return {
-    addDetected(text) { return add(text, false); },
-    addPinned(text) { return add(text, true); },
+    addDetected(text, category) { return add(text, false, category); },
+    addPinned(text, category) { return add(text, true, category); },
+    // A detected question grew ("…? And how did you…?"): update it where it
+    // sits, keeping its id and slot so its hotkey does not move. False when
+    // the original is no longer queued (answered or dismissed) or was typed
+    // by the user — the caller then decides what to add instead.
+    replaceDetected(oldText, newText, category) {
+      const oldNorm = normalize(String(oldText || '').trim());
+      const clean = String(newText || '').trim();
+      const norm = normalize(clean);
+      const item = items.find((q) => !q.pinned && q.norm === oldNorm);
+      if (!item || !norm) return false;
+      if (norm !== oldNorm && has(norm)) return false;
+      item.text = clean;
+      item.norm = norm;
+      if (category) item.category = category; else delete item.category;
+      return true;
+    },
     // Remove and return the item in slot `index` (0-based), or null.
     takeAt(index) {
       if (index < 0 || index >= items.length) return null;
@@ -60,7 +80,11 @@ function createQuestionQueue({ max = 4, normalize = (s) => String(s || '').trim(
       return had;
     },
     size() { return items.length; },
-    items() { return items.map((q) => ({ id: q.id, text: q.text, pinned: q.pinned })); }
+    items() {
+      return items.map((q) => (q.category
+        ? { id: q.id, text: q.text, pinned: q.pinned, category: q.category }
+        : { id: q.id, text: q.text, pinned: q.pinned }));
+    }
   };
 }
 

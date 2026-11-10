@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createQuestionDetector, isQuestionSentence } = require('../src/question-detector');
+const { createQuestionDetector, isQuestionSentence, splitSentences } = require('../src/question-detector');
 
 // ---- sentence classification ------------------------------------------------
 
@@ -36,8 +36,60 @@ test('detects a complete question in a single turn', () => {
 
 test('detects multiple questions in one utterance', () => {
   const d = createQuestionDetector();
+  const found = d.push('What is REST? How would you version an API?', 1000);
+  assert.deepEqual(found, ['What is REST?', 'How would you version an API?']);
+});
+
+test('keeps a compound question together', () => {
+  const d = createQuestionDetector();
   const found = d.push('What is REST? And how does it differ from GraphQL?', 1000);
-  assert.deepEqual(found, ['What is REST?', 'And how does it differ from GraphQL?']);
+  assert.deepEqual(found, ['What is REST? And how does it differ from GraphQL?']);
+});
+
+test('a continuation in a later turn extends the earlier question', () => {
+  const d = createQuestionDetector();
+  assert.deepEqual(d.detect('What was the hardest bug you fixed?', 1000), [{ text: 'What was the hardest bug you fixed?' }]);
+  assert.deepEqual(d.detect('And how did you find it?', 3000), [{
+    text: 'What was the hardest bug you fixed? And how did you find it?',
+    replaces: 'What was the hardest bug you fixed?',
+    tail: 'And how did you find it?'
+  }]);
+});
+
+test('a continuation is not attached across a statement or a long pause', () => {
+  const d = createQuestionDetector();
+  d.push('What is REST?', 1000);
+  assert.deepEqual(d.push('That is a common one. And how does it differ from GraphQL?', 2000),
+    ['And how does it differ from GraphQL?']);
+
+  const e = createQuestionDetector({ mergeWindowMs: 5000 });
+  e.push('What is REST?', 1000);
+  assert.deepEqual(e.push('And how does it differ from GraphQL?', 60000), ['And how does it differ from GraphQL?']);
+});
+
+test('a compound question stops growing after three parts', () => {
+  const d = createQuestionDetector();
+  const found = d.push('What is REST? And what is SOAP? Or what is gRPC? And which one do you prefer?', 1000);
+  assert.deepEqual(found, ['What is REST? And what is SOAP? Or what is gRPC?', 'And which one do you prefer?']);
+});
+
+test('recognizes indirect asks', () => {
+  for (const s of [
+    "I'd like to hear about your last project.",
+    'I’m curious how you handled the migration.',
+    'Help me understand why you chose Postgres.',
+    'I was wondering what your team looked like.'
+  ]) assert.equal(isQuestionSentence(s), true, s);
+  for (const s of [
+    "I'd like a coffee.",
+    'I am happy with the results so far.',
+    'We are curious people here.'
+  ]) assert.equal(isQuestionSentence(s), false, s);
+});
+
+test('splitSentences splits on terminal punctuation', () => {
+  assert.deepEqual(splitSentences('Thanks for joining. What is REST? Great'), ['Thanks for joining.', 'What is REST?', 'Great']);
+  assert.deepEqual(splitSentences(''), []);
 });
 
 test('merges a question split across turns within the merge window', () => {

@@ -404,6 +404,15 @@ body.resizing #resize-grip { opacity: 0.85; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .qq-item:hover .qq-text { color: #fff; }
+/* Kind of question (behavioral, technical, …) */
+.qq-cat {
+  flex: none;
+  font-size: 9.5px; font-weight: 600; line-height: 1;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--tx-mut);
+  padding: 3px 5px; border-radius: 5px;
+  background: rgba(255, 255, 255, 0.06);
+}
 /* Edit / dismiss stay in the row (hidden, not removed) so the question text
    does not re-ellipsize and jump when the mouse passes over a row. */
 .qq-act {
@@ -1519,6 +1528,26 @@ body.resizing #resize-grip { opacity: 0.85; }
   margin-right: 6px;
 }
 .ts-text { display: inline; }
+/* One sentence of a row. Hovering shows what a click will send: the sentence
+   under the pointer, or the whole row when the pointer is on the speaker label. */
+.ts-sent {
+  border-radius: 4px;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  transition: background 120ms ease, color 120ms ease;
+}
+.ts-sent:hover,
+.ts-turn:has(.ts-channel:hover) .ts-sent {
+  background: rgba(60, 131, 245, 0.26);
+  color: #fff;
+}
+.ts-channel:hover { opacity: 1; }
+/* Sentences the question detector recognises (other speaker only) */
+.ts-sent.ts-q {
+  text-decoration: underline dotted rgba(143, 181, 247, 0.75);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
 .ts-interim { font-style: italic; opacity: 0.55; }
 
 .ts-footer {
@@ -1815,6 +1844,7 @@ body.resizing #resize-grip { opacity: 0.85; }
   .notes-btn { padding: 4px 8px; }
   .ai-text { font-size: 15.5px; }
   .ai-text.small { font-size: 14px; }
+  .qq-cat { display: none; }               /* the question text needs the width */
   .user-bubble { max-width: 88%; font-size: 13.5px; padding: 7px 12px; }
   #placeholder, #input { font-size: 14px; }
 }

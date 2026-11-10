@@ -13,6 +13,7 @@ const { AdaptiveVAD } = require('./src/vad');
 const { buildInterviewContextParts, detectCategory } = require('./src/interview-context');
 const { createQuestionDetector, normalize: normalizeQuestion } = require('./src/question-detector');
 const { createQuestionQueue } = require('./src/question-queue');
+const { transcriptThrough } = require('./src/transcript-format');
 const { createChatHistory } = require('./src/chat-history');
 const { createTokenCoalescer } = require('./src/token-coalesce');
 const {
@@ -177,19 +178,35 @@ function sendQuestionQueue() {
   send('questions:update', { items: questionQueue.items() });
 }
 
+// The kind of question (behavioral, technical, …), shown as a small tag on the
+// queue row. Same local classifier the answer uses; 'general' means no tag.
+function questionCategory(text) {
+  const category = detectCategory([], text);
+  return category && category !== 'general' ? category : null;
+}
+
 function addDetectedQuestions(found) {
   if (!found || !found.length) return;
   let changed = false;
-  for (const text of found) changed = questionQueue.addDetected(text) || changed;
+  for (const q of found) {
+    // A continuation ("And how did you…?") extends the question it follows in
+    // place. If that one has already been answered or dismissed, only the new
+    // part is queued.
+    const added = q.replaces
+      ? (questionQueue.replaceDetected(q.replaces, q.text, questionCategory(q.text))
+          || questionQueue.addDetected(q.tail, questionCategory(q.tail)))
+      : questionQueue.addDetected(q.text, questionCategory(q.text));
+    changed = added || changed;
+  }
   if (changed) sendQuestionQueue();
 }
 
 function handleThemUtterance(text, ts) {
-  addDetectedQuestions(questionDetector.push(text, ts));
+  addDetectedQuestions(questionDetector.detect(text, ts));
   // After a quiet gap, classify a trailing fragment that never got terminal
   // punctuation (e.g. "walk me through your resume" with no "?").
   clearTimeout(questionFlushTimer);
-  questionFlushTimer = setTimeout(() => addDetectedQuestions(questionDetector.flushPending()), QUESTION_SILENCE_FLUSH_MS);
+  questionFlushTimer = setTimeout(() => addDetectedQuestions(questionDetector.flushDetailed()), QUESTION_SILENCE_FLUSH_MS);
 }
 
 function clearQuestionQueue() {
@@ -254,7 +271,9 @@ function pushTranscript(turn) {
     transcript.splice(0, removed);
     notesState.lastTurnIndex = Math.max(0, notesState.lastTurnIndex - removed);
   }
-  if (turn.channel === 'them' && !notesState.modeActive) handleThemUtterance(turn.text, turn.ts);
+  // Runs in Notes mode too (the strip is hidden there), so the questions heard
+  // meanwhile are waiting in the queue when the user switches back.
+  if (turn.channel === 'them') handleThemUtterance(turn.text, turn.ts);
   // Nothing reads the notes counters outside Notes mode; entering it fetches
   // a fresh, complete state.
   if (notesState.modeActive) send('notes:state', getNotesPublicState({ includeMarkdown: false }));
@@ -785,11 +804,15 @@ const HISTORY_LABELS = {
 };
 
 // -------- feature runner --------
-async function runFeature(mode, userText) {
+async function runFeature(mode, userText, opts) {
   if (state.busy) return;
   const def = MODES[mode];
   if (!def) return;
   state.busy = true;
+  // The conversation this answer is built from: normally the live transcript;
+  // for a line picked from the history, the conversation as it stood when that
+  // line was said.
+  const convo = transcriptThrough(transcript, opts && opts.contextTs);
   let streamSettled = false; // drop stray tokens from a stream we've already abandoned
   // One timing line per answer when CUE_PERF=1; a no-op otherwise.
   let trace = null;
@@ -801,7 +824,7 @@ async function runFeature(mode, userText) {
     const userBubble = def.userBubble !== null
       ? def.userBubble
       : (mode === 'ask' ? userText : mode === 'answerThis' ? `"${(userText || '').slice(0, 60)}${userText && userText.length > 60 ? '…' : ''}"` : null);
-    const category = mode !== 'leetcode' ? detectCategory(transcript, userText) : null;
+    const category = mode !== 'leetcode' ? detectCategory(convo, userText) : null;
     send('llm:start', { userBubble, small: !!def.small, category });
 
     if (!llm.ready) {
@@ -830,9 +853,9 @@ async function runFeature(mode, userText) {
       || /\b(screen|screenshot|slide|diagram|code|line|function|class|method|bug|error|exception|warning|output|terminal|console|image|chart|table|graph|window|page|browser|editor|ide|shown|visible|display|above|below|look at|read this|solve this|fix this|what is this|on screen|hackerrank|leetcode)\b/i.test(userText);
     const skipScreenForTextAsk = mode === 'ask' && !referencesScreen;
     const recentThemTurn = mode === 'say'
-      && transcript.length > 0
-      && transcript.slice(-3).some(t => t.channel === 'them' && t.text && t.text.trim().length > 12 && !/\b(screen|slide|diagram|code|line|chart|table|shown|look at|here)\b/i.test(t.text));
-    const skipScreenForQuick = isQuickMode && ((userText && userText.trim().length > 0) || transcript.length > 0);
+      && convo.length > 0
+      && convo.slice(-3).some(t => t.channel === 'them' && t.text && t.text.trim().length > 12 && !/\b(screen|slide|diagram|code|line|chart|table|shown|look at|here)\b/i.test(t.text));
+    const skipScreenForQuick = isQuickMode && ((userText && userText.trim().length > 0) || convo.length > 0);
 
     const needsScreenNow = def.needsScreen && !skipScreenForTextAsk && !recentThemTurn && !skipScreenForQuick;
 
@@ -872,7 +895,7 @@ async function runFeature(mode, userText) {
     // description) opens the system prompt and is identical on every ask, so
     // the provider can serve it from its prompt cache; `dynamic` is specific to
     // this question's category and follows the instructions.
-    const contextParts = isQuickMode ? null : buildInterviewContextParts(settings, mode, transcript, userText, category);
+    const contextParts = isQuickMode ? null : buildInterviewContextParts(settings, mode, convo, userText, category);
     const system = isQuickMode
       ? QUICK_GOTCHA_SYSTEM
       : (def.buildSystem ? def.buildSystem(contextParts, settings.aiRules || '', settings) : (def.system || ''));
@@ -880,8 +903,8 @@ async function runFeature(mode, userText) {
       ? contextParts.fixed.length
       : 0;
     const built = isQuickMode
-      ? buildQuickTurn({ transcript, userText: userText || '' })
-      : def.build({ transcript, userText: userText || '', chatHistory: chatHistory.all() });
+      ? buildQuickTurn({ transcript: convo, userText: userText || '' })
+      : def.build({ transcript: convo, userText: userText || '', chatHistory: chatHistory.all() });
     const imageDataUrl = await screenshotPromise;
     if (needsScreenNow) trace.mark('screenshot');
     trace.set('system_chars', system.length);
@@ -1344,9 +1367,12 @@ ipcMain.on('questions:dismiss', (_e, id) => {
 // User pre-typed a question into the queue. Pinned: auto-detections can never
 // evict it; it leaves only by being answered, dismissed, or a newer pinned add.
 ipcMain.on('questions:add', (_e, text) => {
-  if (questionQueue.addPinned(typeof text === 'string' ? text : '')) sendQuestionQueue();
+  const clean = typeof text === 'string' ? text : '';
+  if (questionQueue.addPinned(clean, questionCategory(clean))) sendQuestionQueue();
 });
-ipcMain.on('ask', (_e, payload) => runFeature(payload.mode, payload.text));
+// `contextTs` is set when the question was picked from the conversation
+// history: the answer is then built from the conversation up to that moment.
+ipcMain.on('ask', (_e, payload) => runFeature(payload.mode, payload.text, { contextTs: payload.contextTs }));
 // Renderer signals intent (e.g. first keystroke in the ask box): pre-open the
 // provider connection so TLS is done before the user presses Enter. Deduped
 // inside llm.js, so keystroke spam costs nothing.
@@ -1479,7 +1505,9 @@ function registerShortcuts() {
   for (let slot = 0; slot < 4; slot++) {
     shortcutState['answerQ' + (slot + 1)] = globalShortcut.register(
       `CommandOrControl+Alt+${slot + 1}`,
-      () => answerDetectedQuestion(slot)
+      // Not in Notes mode: the queue keeps filling there but is not shown, and
+      // a hotkey should never act on a list the user cannot see.
+      () => { if (!notesState.modeActive) answerDetectedQuestion(slot); }
     );
   }
   shortcutState.quit = globalShortcut.register('CommandOrControl+Shift+X', () => app.quit());
@@ -1667,7 +1695,7 @@ function launchApp() {
           send('chat:clear', {});
           break;
         case 'question:add':
-          if (questionQueue.addPinned(typeof msg.text === 'string' ? msg.text : '')) sendQuestionQueue();
+          if (questionQueue.addPinned(typeof msg.text === 'string' ? msg.text : '', questionCategory(typeof msg.text === 'string' ? msg.text : ''))) sendQuestionQueue();
           break;
         case 'question:dismiss':
           if (questionQueue.removeById(msg.id)) sendQuestionQueue();

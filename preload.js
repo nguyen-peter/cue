@@ -1,8 +1,13 @@
 const { contextBridge, ipcRenderer, clipboard } = require('electron');
 const platform = process.platform;
+// The history marks questions with the same rules that fill the question
+// queue, so the two always agree. Pure string functions, no I/O.
+const { splitSentences, isQuestionSentence } = require('./src/question-detector');
 
 contextBridge.exposeInMainWorld('cue', {
   platform,
+  splitSentences: (text) => splitSentences(String(text || '')),
+  isQuestionSentence: (text) => isQuestionSentence(String(text || '')),
   copyText: (text) => {
     const str = String(text || '');
     try { clipboard.writeText(str); } catch (_) {}
