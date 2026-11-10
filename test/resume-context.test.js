@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { buildResumeContext, parseResume } = require('../src/resume-context');
-const { buildInterviewContext, detectCategory } = require('../src/interview-context');
+const { buildInterviewContext, buildInterviewContextParts, detectCategory } = require('../src/interview-context');
 
 // ── buildResumeContext (backward-compat shim) ─────────────────────────────────
 test('buildResumeContext returns a structured prompt block for resume text', () => {
@@ -121,7 +121,26 @@ test('buildInterviewContext: returns null with no settings data', () => {
 test('buildInterviewContext: JD tailor note included when JD is set', () => {
   const ctx = buildInterviewContext(fullSettings, 'say', []);
   assert.ok(ctx !== null);
-  assert.ok(ctx.includes('Tailor'), 'should include tailor note when JD is set');
+  assert.ok(ctx.includes('tailor it to the target role'), 'should include tailor note when JD is set');
+  assert.ok(!/Tailor every answer/.test(ctx), 'tailoring applies to answers about the candidate, not to every answer');
+});
+
+test('buildInterviewContext: background is scoped to questions about the candidate', () => {
+  const ctx = buildInterviewContext(fullSettings, 'ask', [], 'How does Kerberos delegation work?');
+  assert.match(ctx, /WHEN TO USE THE BACKGROUND/);
+  assert.match(ctx, /knowledge question about a tool, technology, or domain that is not on the resume still gets a full, direct answer/);
+});
+
+test('buildInterviewContext: unclassified questions mark personal notes as conditional', () => {
+  const ctx = buildInterviewContext(fullSettings, 'ask', [], 'Design a rate limiter for a public API.');
+  assert.match(ctx, /Key Experience Highlights/);
+  assert.match(ctx, /Use them only if the question is about the candidate/);
+});
+
+test('buildInterviewContext: the fixed part does not depend on the question', () => {
+  const a = buildInterviewContextParts(fullSettings, 'ask', [], 'How does Kerberos delegation work?');
+  const b = buildInterviewContextParts(fullSettings, 'ask', [], 'Tell me about a time you led a project.');
+  assert.equal(a.fixed, b.fixed);
 });
 
 // ── Multi-role & 1st-person hardening regression tests ─────────────────────────

@@ -60,7 +60,7 @@ const SPEAKABLE_STAGED_FORMAT =
   '\n\n=== Default Output Structure (Speakable Talk Track First) ===\n' +
   'Unless custom style rules at the end of this prompt explicitly require a different format (such as paragraphs-only or a specific consulting layout), structure your answer in two stages:\n' +
   'Stage 1 — 30-Second Speakable Talk Track (ALWAYS FIRST):\n' +
-  '- Give 2–3 short markdown bullet points (each on its own line starting with `- `) written in natural, conversational first-person speech ("I built...", "The main tradeoff was...", "We cut latency by...").\n' +
+  '- Give 2–3 short markdown bullet points (each on its own line starting with `- `) written as natural, conversational speech. Use first-person experience ("I built...", "We cut latency by...") only when the question is about the user\'s own work; for technical or conceptual questions state the explanation directly ("The main tradeoff is...", "It works by...").\n' +
   '- Write each bullet so that if the user reads it out loud word-for-word, it sounds like natural, confident human speech (use contractions like "I\'ve", "we\'d", "didn\'t" and natural spoken cadence — never robotic resume fragments).\n' +
   '- Start each bullet with a **2–4 word bold anchor** so the eye can scan it in a split second.\n' +
   'Stage 2 — Deeper Detail / Follow-Up Backup (BELOW A `---` DIVIDER, when helpful):\n' +
@@ -245,7 +245,7 @@ const MODES = {
         'Rules:\n' +
         '• BEHAVIORAL ("tell me about a time…"): STAR format using real stories from the candidate\'s background. Situation → Task → Action → Result. Include metrics if available.\n' +
         '• MOTIVATION ("why this company/role"): Specific, genuine reasons from their stated preferences.\n' +
-        '• TECHNICAL: Clear explanation with a concrete example from their experience.\n' +
+        '• TECHNICAL: Clear, direct explanation of the concept itself. Add an example from their experience only if their background really contains a fitting one; never force one in.\n' +
         '• EXPERIENCE: Reference specific roles/projects from their resume.\n' +
         '• COMPENSATION: State the salary target confidently in one sentence.\n' +
         '• SITUATIONAL: Structured thinking — "First I would X, then Y, because Z."\n\n' +

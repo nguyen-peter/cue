@@ -413,7 +413,7 @@ function buildInterviewContextParts(settings, mode, transcript, userText, precom
 
     case 'situational':
       if (workStyle) blocks.push('Decision-Making Style / Values:\n' + clip(workStyle, 500));
-      if (hasStories) blocks.push('Relevant Past Experience:\n' + clip(stories, 800));
+      if (hasStories) blocks.push('Relevant Past Experience (optional — mention only where it directly strengthens the answer):\n' + clip(stories, 800));
       break;
 
     case 'experience':
@@ -432,6 +432,13 @@ function buildInterviewContextParts(settings, mode, transcript, userText, precom
 
     case 'general':
     default:
+      // 'general' is whatever the classifier could not place, which includes
+      // plenty of technical questions ("Design a rate limiter.", "Review this
+      // auth flow"). The material stays available for the personal questions
+      // that also land here, but is marked as not for the others.
+      if (hasStories || workStyle) {
+        blocks.push('The notes below are about the candidate. Use them only if the question is about the candidate or how they work; ignore them for technical, conceptual, coding, design or review questions.');
+      }
       if (hasStories) blocks.push('Key Experience Highlights:\n' + clip(stories, 600));
       if (workStyle)  blocks.push('Work Style:\n' + clip(workStyle, 300));
       break;
@@ -440,13 +447,17 @@ function buildInterviewContextParts(settings, mode, transcript, userText, precom
   if (!fixedBlocks.length && !blocks.length) return null;
 
   const tailorNote = hasJD
-    ? '\nTailor every answer to highlight fit with the target role above.'
+    ? '\nWhen an answer is about the candidate (background, motivation, fit), tailor it to the target role above. Technical, conceptual, coding and design questions are answered on their merits.'
     : '';
 
   const groundingRules = (hasResume || hasStories)
     ? '\n\n=== Grounding & Source Citation Rules ===\n' +
+      // These rules are the same on every ask (they are part of the cached
+      // prefix), so relevance is stated here in words rather than by leaving
+      // the résumé out for some categories.
+      '• WHEN TO USE THE BACKGROUND: The background, job description and stories are reference material about the candidate, not the subject of every answer. Use them when the question is about the candidate: their experience, past work, motivation or fit. When the question is about how something works, a concept, a tool, code, a system design or a security review, answer it directly from expert knowledge and leave out the candidate\'s roles, projects, stories and metrics unless the question asks for them.\n' +
       '• SOURCE CITATION: Whenever you answer a behavioral, experience, or background question using the candidate\'s resume or STAR stories, start the very first line with a short bracketed source tag like `[Source: <Company / Role or Project Name>]` so the candidate immediately sees which story or role to speak from.\n' +
-      '• NO-BLUFF / BRIDGE RULE: Never invent experience, tools, or metrics not present in the candidate\'s background. If asked about a tool, technology, or domain not on the resume, start with `[Not on resume — bridge]` and give an honest 1-line pivot to the closest real skill or project from their background.'
+      '• NO-BLUFF / BRIDGE RULE: Never invent experience, tools, or metrics not present in the candidate\'s background. This limits what you claim about the candidate, not what you explain: a knowledge question about a tool, technology, or domain that is not on the resume still gets a full, direct answer with no tag. Only when the question asks about the candidate\'s own experience with something not on the resume ("have you used X?", "tell me about your work with X"), start with `[Not on resume — bridge]` and give an honest 1-line pivot to the closest real skill or project from their background.'
     : '';
 
   return {
