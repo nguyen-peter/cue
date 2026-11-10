@@ -186,6 +186,55 @@ test('buildInterviewContext: retains Barker Lab and detects 1st-person typed que
   assert.ok(ctx.includes('Ecolab'), 'prompt context must contain Ecolab');
 });
 
+// A normal one-page resume: more experience than the old per-section caps
+// allowed, plus sections the parser has no name for.
+const fullLengthResume = [
+  'Peter Nguyen',
+  '(555) 010-0000 | peter@example.com | Minneapolis, MN',
+  'Security-minded software engineer with a background in healthcare software.',
+  'EXPERIENCE',
+  ...['Ecolab', 'Optum', 'Barker Lab', 'Initech', 'Globex'].flatMap((company, i) => [
+    `${company} St. Paul, MN`,
+    `Engineer ${i + 1}, Platform Team 20${20 + i} – 20${21 + i}`,
+    ...Array.from({ length: 4 }, (_, b) => `• ${company} bullet ${b + 1}: shipped a measurable improvement to service number ${i}${b} for thousands of users.`)
+  ]),
+  'PROJECTS',
+  'HomeLab SIEM (Wazuh, Suricata)',
+  '• Detection lab with 25 custom rules mapped to MITRE ATT&CK.',
+  'LEADERSHIP & ACTIVITIES',
+  'President, Vietnamese Student Association 2022 – 2023',
+  'TECHNICAL EXPERTISE',
+  'Languages: C#, TypeScript, Python',
+  'EDUCATION',
+  'Bachelor of Computer Science, minor in Mathematics May 2024',
+  'CERTIFICATIONS',
+  'CompTIA Security+ (2025)',
+  'AWARDS',
+  '1st place, MinneHack 2023'
+].join('\n');
+
+test('buildInterviewContext: every line of a full-length resume reaches the prompt, in order', () => {
+  assert.ok(fullLengthResume.length > 2600, 'the sample must be longer than the old 2,600-character budget');
+  const ctx = buildInterviewContext({ resumeText: fullLengthResume }, 'ask', [], 'Tell me about my time at Globex.');
+  let at = -1;
+  for (const line of fullLengthResume.split('\n')) {
+    const found = ctx.indexOf(line, at + 1);
+    assert.ok(found > at, `missing or out of order: ${line}`);
+    at = found;
+  }
+});
+
+test('buildInterviewContext: a resume over the budget is cut at a line end, from the top', () => {
+  const huge = ['Jane Doe', 'EXPERIENCE', ...Array.from({ length: 400 }, (_, i) => `• Bullet number ${i} describing a piece of work in some detail.`)].join('\n');
+  const ctx = buildInterviewContext({ resumeText: huge }, 'ask', [], 'Tell me about my experience.');
+  assert.ok(ctx.includes('• Bullet number 0 describing'));
+  assert.ok(ctx.includes('• Bullet number 150 describing'));
+  assert.ok(!ctx.includes('• Bullet number 399 describing'));
+  const block = ctx.slice(ctx.indexOf('=== Your Background ==='), ctx.indexOf('=== Grounding'));
+  assert.ok(block.length < 12200);
+  assert.match(block, /in some detail\.\n…/, 'ends on a whole line');
+});
+
 test('detectCategory: handles 1st-person typed questions and role-specific inquiries', () => {
   assert.equal(detectCategory([], 'tell me about my machine learning research assistant experience'), 'experience');
   assert.equal(detectCategory([], 'walk me through my background at ecolab'), 'experience');

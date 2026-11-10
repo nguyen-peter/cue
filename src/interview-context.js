@@ -179,25 +179,6 @@ function classifyHeading(line) {
 }
 
 // ── Resume parser ─────────────────────────────────────────────────────────────
-const SECTION_LABELS = {
-  summary: 'Summary',
-  experience: 'Experience',
-  skills: 'Skills',
-  education: 'Education',
-  projects: 'Projects',
-  certifications: 'Certifications'
-};
-
-const SECTION_CAPS = {
-  name: 80,
-  summary: 400,
-  experience: 2400,
-  skills: 600,
-  projects: 800,
-  education: 400,
-  certifications: 400
-};
-
 let _cachedResumeInput = null;
 let _cachedResumeParsed = null;
 const _cachedResumeBlocks = new Map();
@@ -280,25 +261,20 @@ function buildResumeBlock(resumeText, limit = 2800) {
   if (!parsed) return '';
   if (_cachedResumeBlocks.has(limit)) return _cachedResumeBlocks.get(limit);
   let out = '';
-  if (parsed.parsed) {
-    const parts = [];
-    let rem = limit;
-    const order = ['name', 'summary', 'experience', 'skills', 'projects', 'education', 'certifications'];
-    for (const key of order) {
-      if (rem <= 0) break;
-      const val = parsed.sections[key];
-      if (!val) continue;
-      const label = SECTION_LABELS[key];
-      const maxForSection = SECTION_CAPS[key] || 600;
-      const chunk = label
-        ? `${label}:\n${clip(val, Math.min(rem - label.length - 2, maxForSection))}`
-        : clip(val, Math.min(rem, maxForSection));
-      parts.push(chunk);
-      rem -= chunk.length;
-    }
-    out = parts.join('\n\n');
+  // A resume that fits is sent exactly as written, top to bottom. Splitting it
+  // into known sections and capping each one dropped whatever came last or had
+  // an unrecognised heading (projects, leadership, education, certifications,
+  // awards, the opening summary line), and the model then treated those parts
+  // as "not on the resume".
+  const whole = parsed.raw.replace(/\r\n?/g, '\n').replace(/[ \t]+/g, ' ').replace(/ ?\n ?/g, '\n').replace(/\n{3,}/g, '\n\n');
+  if (whole.length <= limit) {
+    out = whole;
   } else {
-    out = clip(parsed.raw, limit);
+    // Longer than the budget: keep it in order and cut at the end of a line,
+    // so what is sent is still a readable resume up to that point.
+    const head = whole.slice(0, limit);
+    const lastBreak = head.lastIndexOf('\n');
+    out = (lastBreak > limit * 0.8 ? head.slice(0, lastBreak) : head).trimEnd() + '\n…';
   }
   _cachedResumeBlocks.set(limit, out);
   return out;
@@ -333,7 +309,10 @@ function buildContextDocBlock(doc, limit = MAX_CONTEXT_DOC_CHARS) {
 // They used to shrink for technical and compensation questions, which saved a
 // few hundred tokens but changed the start of the prompt from one ask to the
 // next — and providers only reuse (cache) a prompt up to its first difference.
-const RESUME_CONTEXT_CHARS = 2600;
+// Large enough for a three-page resume to go in whole (about 3,000 tokens,
+// all of it in the cacheable start of the prompt). At the old 2,600 a normal
+// one-page resume lost everything after its experience section.
+const RESUME_CONTEXT_CHARS = 12000;
 const JD_CONTEXT_CHARS = 600;
 
 /**
@@ -457,7 +436,7 @@ function buildInterviewContextParts(settings, mode, transcript, userText, precom
       // the résumé out for some categories.
       '• WHEN TO USE THE BACKGROUND: The background, job description and stories are reference material about the candidate, not the subject of every answer. Use them when the question is about the candidate: their experience, past work, motivation or fit. When the question is about how something works, a concept, a tool, code, a system design or a security review, answer it directly from expert knowledge and leave out the candidate\'s roles, projects, stories and metrics unless the question asks for them.\n' +
       '• SOURCE CITATION: Whenever you answer a behavioral, experience, or background question using the candidate\'s resume or STAR stories, start the very first line with a short bracketed source tag like `[Source: <Company / Role or Project Name>]` so the candidate immediately sees which story or role to speak from.\n' +
-      '• NO-BLUFF / BRIDGE RULE: Never invent experience, tools, or metrics not present in the candidate\'s background. This limits what you claim about the candidate, not what you explain: a knowledge question about a tool, technology, or domain that is not on the resume still gets a full, direct answer with no tag. Only when the question asks about the candidate\'s own experience with something not on the resume ("have you used X?", "tell me about your work with X"), start with `[Not on resume — bridge]` and give an honest 1-line pivot to the closest real skill or project from their background.'
+      '• NO-BLUFF / BRIDGE RULE: Never invent experience, tools, or metrics not present in the candidate\'s background. This limits what you claim about the candidate, not what you explain: a knowledge question about a tool, technology, or domain that is not on the resume still gets a full, direct answer with no tag. Only when the question asks about the candidate\'s own experience with something that appears nowhere in the background above — check every part of it first, including projects, education, additional experience, activities and awards — ("have you used X?", "tell me about your work with X"), start with `[Not on resume — bridge]` and give an honest 1-line pivot to the closest real skill or project from their background.'
     : '';
 
   return {
