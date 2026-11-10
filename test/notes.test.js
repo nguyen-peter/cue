@@ -537,3 +537,31 @@ test('planNotesUpdate covers everything when it fits, and rewrites only short ty
   const prompt = buildLiveNotesPrompt({ transcript: [], previousNotes: longNotes, task: 'update', appendOnly: true, maxNotesChars: budget.maxNotesChars });
   assert.ok(prompt.includes('Task — SUMMARIZE & CONNECT THE NOTES (INCREMENTAL):'));
 });
+
+test('normalizes bulleted Questions headings and drops rephrased worm/virus questions with trailing filler', () => {
+  const existing = [
+    '❓ Follow-Up Questions to Ask:',
+    '- Can you provide more details on the specific use cases for GitHub secret scanning?',
+    '- What are the main differences between a worm and a virus in terms of their behavior and impact?',
+    '',
+    '✅ Action Items:',
+    '- None yet.',
+    '- Questions to Ask (12:57 PM):',
+    '- Can you give an example of how GitHub secret scanning can prevent a security breach in a real-world scenario?',
+    '- How do the replication mechanisms of worms and viruses differ, and what are the potential risks associated with each?'
+  ].join('\n');
+
+  // 1) extractExistingQuestions must find questions even when the heading was bulleted ("- Questions to Ask (12:57 PM):")
+  const extracted = extractExistingQuestions(existing);
+  assert.strictEqual(extracted.length, 4);
+  assert.ok(extracted.some((q) => q.includes('replication mechanisms of worms and viruses')));
+
+  // 2) Rephrased worm/virus questions with trailing filler and a bulleted heading must all be dropped
+  const repeatChunk = [
+    '- Questions to Ask (12:58 PM):',
+    '- How do the replication mechanisms of worms and viruses differ, and what are the specific risks associated with each in terms of network security?',
+    '- How do the replication mechanisms of worms and viruses differ in terms of their propagation methods and potential network impacts?'
+  ].join('\n');
+
+  assert.strictEqual(deduplicateBullets(existing, repeatChunk), '');
+});

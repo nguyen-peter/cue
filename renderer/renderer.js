@@ -659,7 +659,12 @@
       .replace(/\*\*([^*]+)\*\*/g, '$1')
       .replace(/`[-*•]\s*`/g, '')
       .replace(/^\s*[-*•]\s+(?:`?[-*•]`?\s*)+/gm, '- ')
-      .replace(/^\s*[-*•]\s+/gm, '- ');
+      .replace(/^\s*[-*•]\s+/gm, '- ')
+      .replace(/^- (?:❓\s*)?((?:Follow-Up Questions|Questions to Ask)\b[^\n]*:\s*)$/gim, '❓ $1')
+      .replace(/^- (?:📌\s*)?((?:Live Summary|Summary & How It Connects|Discussion Update)\b[^\n]*:\s*)$/gim, '📌 $1')
+      .replace(/^- (?:💡\s*)?((?:Key Insights|Technical Breakdown)\b[^\n]*:\s*)$/gim, '💡 $1')
+      .replace(/^- (?:✅\s*)?(Action Items\b[^\n]*:\s*)$/gim, '✅ $1')
+      .replace(/^- ([📌💡❓🧠✅]\s*[^\n]*:\s*)$/gm, '$1');
   }
 
   function updateNotesEditorPreservingCursor(newValue) {

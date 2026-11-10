@@ -76,7 +76,12 @@ function formatNotesForEditor(raw) {
     .replace(/\*\*([^*]+)\*\*/g, '$1')
     .replace(/`[-*•]\s*`/g, '')
     .replace(/^\s*[-*•]\s+(?:`?[-*•]`?\s*)+/gm, '- ')
-    .replace(/^\s*[-*•]\s+/gm, '- ');
+    .replace(/^\s*[-*•]\s+/gm, '- ')
+    .replace(/^- (?:❓\s*)?((?:Follow-Up Questions|Questions to Ask)\b[^\n]*:\s*)$/gim, '❓ $1')
+    .replace(/^- (?:📌\s*)?((?:Live Summary|Summary & How It Connects|Discussion Update)\b[^\n]*:\s*)$/gim, '📌 $1')
+    .replace(/^- (?:💡\s*)?((?:Key Insights|Technical Breakdown)\b[^\n]*:\s*)$/gim, '💡 $1')
+    .replace(/^- (?:✅\s*)?(Action Items\b[^\n]*:\s*)$/gim, '✅ $1')
+    .replace(/^- ([📌💡❓🧠✅]\s*[^\n]*:\s*)$/gm, '$1');
 }
 
 // ── Context budget ───────────────────────────────────────────────────────────
@@ -152,20 +157,65 @@ const STOPWORDS = new Set([
   'also', 'you', 'your', 'they', 'them', 'these', 'those', 'any', 'all'
 ]);
 
+// Generic question-framing words that models swap or append when rephrasing
+// an already-asked question ("What are the specific risks associated with each in terms of...").
+const QUESTION_FILLER = new Set([
+  'provide', 'detail', 'specific', 'potential', 'associat', 'each', 'term', 'main', 'between',
+  'exampl', 'real', 'world', 'scenario', 'give', 'explain', 'clarify', 'elaborat', 'process',
+  'handl', 'approach', 'aspect', 'regard', 'relat', 'consider', 'impact', 'method'
+]);
+
 function normalizeLine(text) {
   return String(text || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+}
+
+function stemWord(word) {
+  if (/\d/.test(word) || word.length <= 3) return word;
+  let w = word;
+  if (w.endsWith('ies') && w.length > 4) w = w.slice(0, -3) + 'y';
+  else if (w.endsWith('uses') && w.length > 5) w = w.slice(0, -2);
+  else if (/(?:ses|xes|zes|ches|shes)$/.test(w) && w.length > 5) w = w.slice(0, -2);
+  else if (w.endsWith('s') && !w.endsWith('ss') && !w.endsWith('us') && !w.endsWith('is')) w = w.slice(0, -1);
+
+  if (w.endsWith('ences') || w.endsWith('ence')) w = w.replace(/ences?$/, '');
+  else if (w.endsWith('ations') || w.endsWith('ation')) w = w.replace(/ations?$/, 'at');
+  else if (w.endsWith('itions') || w.endsWith('ition')) w = w.replace(/itions?$/, 'it');
+  else if (w.endsWith('ments') || w.endsWith('ment')) {
+    if (w.length > 6) w = w.replace(/ments?$/, '');
+  } else if (w.endsWith('ing') && w.length > 5) w = w.slice(0, -3);
+  else if (w.endsWith('ed') && w.length > 4) w = w.slice(0, -2);
+
+  if (w.endsWith('e') && w.length > 4) w = w.slice(0, -1);
+  return w.length >= 3 ? w : word;
 }
 
 // Words that carry meaning: longer than two letters and not filler. Anything
 // containing a digit is always kept, so "15 minutes" and "30 minutes" differ.
 function significantWords(text) {
   const words = new Set();
-  for (const word of String(text || '').toLowerCase().split(/[^\p{L}\p{N}]+/u)) {
-    if (!word) continue;
-    if (/\d/.test(word)) words.add(word);
-    else if (word.length > 2 && !STOPWORDS.has(word)) words.add(word);
+  for (const raw of String(text || '').toLowerCase().split(/[^\p{L}\p{N}]+/u)) {
+    if (!raw) continue;
+    if (/\d/.test(raw)) words.add(raw);
+    else if (raw.length > 2 && !STOPWORDS.has(raw)) words.add(stemWord(raw));
   }
   return words;
+}
+
+function questionInfo(text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed.endsWith('?')) return null;
+  const ordered = [];
+  const topicWords = new Set();
+  for (const raw of trimmed.toLowerCase().split(/[^\p{L}\p{N}]+/u)) {
+    if (!raw || raw.length <= 2 || STOPWORDS.has(raw)) continue;
+    const stemmed = /\d/.test(raw) ? raw : stemWord(raw);
+    if (!ordered.includes(stemmed)) ordered.push(stemmed);
+    if (!QUESTION_FILLER.has(stemmed)) topicWords.add(stemmed);
+  }
+  return {
+    openingKey: ordered.slice(0, 4).length >= 4 ? ordered.slice(0, 4).join('|') : '',
+    topicWords
+  };
 }
 
 // A new bullet is redundant only when it adds nothing to a line already in the
@@ -193,15 +243,39 @@ function isRedundantBullet(bullet, existing) {
     }
     if (!newNumber && covered / words.size >= DUPLICATE_COVERAGE) return true;
   }
+
+  // Question-specific anti-repetition: catch rephrased questions that share the
+  // same 4+ word opening clause or repeat the core topic words of a prior question
+  // while padding the tail with generic framing ("in terms of...", "associated with each").
+  const qInfo = questionInfo(bullet);
+  if (qInfo && existing.questions) {
+    if (qInfo.openingKey && existing.questionOpenings.has(qInfo.openingKey)) return true;
+    if (qInfo.topicWords.size >= 2) {
+      for (const prevTopic of existing.questions) {
+        if (prevTopic.size < 2) continue;
+        let shared = 0;
+        let newNum = false;
+        for (const w of qInfo.topicWords) {
+          if (prevTopic.has(w)) shared += 1;
+          else if (/\d/.test(w)) newNum = true;
+        }
+        if (newNum) continue;
+        if (shared >= 3 && (shared / qInfo.topicWords.size >= 0.6 || shared / prevTopic.size >= 0.7)) {
+          return true;
+        }
+      }
+    }
+  }
   return false;
 }
 
 // Split generated text into sections: a heading line and the bullets under it.
 // An indented line after a bullet is that bullet's continuation.
 function parseSections(chunk) {
+  const normalizedChunk = formatNotesForEditor(chunk);
   const sections = [];
   let current = { header: '', bullets: [] };
-  for (const raw of chunk.split(/\r?\n/)) {
+  for (const raw of normalizedChunk.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line) continue;
     if (BULLET_RE.test(line)) {
@@ -229,13 +303,16 @@ function deduplicateBullets(existingText, newChunk) {
   // rather than report "nothing new" for text that was never examined.
   if (!sections.some((section) => section.bullets.length)) return newChunk;
 
-  const existingLines = existingText
+  const existingLines = formatNotesForEditor(existingText)
     .split(/\r?\n/)
     .map((line) => line.replace(/^[-*•]\s*/, '').trim())
     .filter((line) => line.length > 10);
+  const existingQInfos = existingLines.map(questionInfo).filter(Boolean);
   const existing = {
     norms: new Set(existingLines.map(normalizeLine).filter(Boolean)),
-    wordSets: existingLines.map(significantWords)
+    wordSets: existingLines.map(significantWords),
+    questionOpenings: new Set(existingQInfos.map((q) => q.openingKey).filter(Boolean)),
+    questions: existingQInfos.map((q) => q.topicWords)
   };
 
   const kept = [];
@@ -248,6 +325,11 @@ function deduplicateBullets(existingText, newChunk) {
       const norm = normalizeLine(content);
       if (norm) existing.norms.add(norm);
       existing.wordSets.push(significantWords(content));
+      const qInfo = questionInfo(content);
+      if (qInfo) {
+        if (qInfo.openingKey) existing.questionOpenings.add(qInfo.openingKey);
+        existing.questions.push(qInfo.topicWords);
+      }
       bullets.push(line);
     }
     if (bullets.length) kept.push((section.header ? section.header + '\n' : '') + bullets.join('\n'));
@@ -257,10 +339,22 @@ function deduplicateBullets(existingText, newChunk) {
 
 function extractExistingQuestions(text) {
   if (!text || typeof text !== 'string') return [];
+  const normalized = formatNotesForEditor(text);
+  const seen = new Set();
   const questions = [];
-  const qRegex = /(?:^|\n)(?:#{1,6}\s*)?(?:❓\s*)?(?:Follow-Up Questions|Questions to Ask)[^\n]*(?:\n[\s\S]*?)?(?=\n(?:#{1,6}\s*)?(?:[📌💡❓🧠✅]|\b(?:Live Summary|Summary|Key Insights|Technical Breakdown|Follow-Up|Action Items|Discussion Update)\b)|$)/gi;
+  const addQuestion = (q) => {
+    const clean = q.trim();
+    if (!clean || clean.length <= 15) return;
+    if (/^(?:Follow-Up Questions|Questions to Ask|Live Summary|Discussion Update|Key Insights|Action Items)\b/i.test(clean)) return;
+    const key = normalizeLine(clean);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    questions.push(clean);
+  };
+
+  const qRegex = /(?:^|\n)(?:#{1,6}\s*|[-*•]\s*)?(?:❓\s*)?(?:Follow-Up Questions|Questions to Ask)[^\n]*(?:\n[\s\S]*?)?(?=\n(?:#{1,6}\s*|[-*•]\s*)?(?:[📌💡❓🧠✅]|\b(?:Live Summary|Summary|Key Insights|Technical Breakdown|Follow-Up|Action Items|Discussion Update|Questions to Ask)\b)|$)/gi;
   let match;
-  while ((match = qRegex.exec(text)) !== null) {
+  while ((match = qRegex.exec(normalized)) !== null) {
     const block = match[0];
     const lines = block.split(/\r?\n/);
     for (const raw of lines) {
@@ -268,9 +362,16 @@ function extractExistingQuestions(text) {
       if (/^[-*•]\s+/.test(line)) {
         const clean = line.replace(/^[-*•]\s+/, '').trim();
         if (clean && (clean.endsWith('?') || clean.length > 15)) {
-          questions.push(clean);
+          addQuestion(clean);
         }
       }
+    }
+  }
+  for (const raw of normalized.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (/^[-*•]\s+/.test(line)) {
+      const clean = line.replace(/^[-*•]\s+/, '').trim();
+      if (clean.endsWith('?')) addQuestion(clean);
     }
   }
   return questions;
@@ -446,10 +547,11 @@ function buildLiveNotesPrompt({
       'Review the LATEST conversation turns above (and recent notes) and generate 2–3 timely, practical questions the user can ask RIGHT NOW in the meeting:\n\n' +
       `❓ Questions to Ask${timeSuffix}:\n` +
       '- 2–3 sharp, practical questions focused strictly on the LATEST topics, decisions, or trade-offs being discussed.\n' +
-      '- CRITICAL ANTI-REPETITION RULE: You MUST NOT re-ask, paraphrase, or invert any of the previously asked questions listed above. Every question must explore a new aspect of the current discussion.\n' +
+      '- PRIORITIZE UNASKED TOPICS: First target topics, tools, or items mentioned in the notes/transcript that do NOT have any questions asked about them yet. Never generate two questions about the same topic or comparison.\n' +
+      '- CRITICAL ANTI-REPETITION RULE: You MUST NOT re-ask, paraphrase, or invert any of the previously asked questions listed above. Every question must explore a completely new angle (e.g., implementation, edge cases, operational impact, or trade-offs).\n' +
       '- STRICT SCOPE: Do NOT ask questions about outside tools, companies, or topics not present in the input above.\n\n' +
       'Output Rules:\n' +
-      `- Output ONLY the "❓ Questions to Ask${timeSuffix}:" section starting directly with that heading line and single hyphen bullets (- ).\n` +
+      `- Output ONLY the "❓ Questions to Ask${timeSuffix}:" section starting directly with that exact heading line (do NOT put a "- " bullet before the heading) followed by single hyphen bullets (- ).\n` +
       '- Each bullet must start with a single hyphen (- ). Do not wrap bullets in quotes or backticks.\n' +
       '- Do NOT repeat or rewrite earlier notes or output preamble/closing filler.\n' +
       '- Do not use # or ** symbols.'
