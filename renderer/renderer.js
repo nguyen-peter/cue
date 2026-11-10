@@ -2399,6 +2399,10 @@
   // Suppress native OS right-click context menu and native OS [title] tooltips
   // (both spawn separate child HWNDs that are not covered by WDA_EXCLUDEFROMCAPTURE).
   window.addEventListener('contextmenu', (e) => e.preventDefault());
+  // Dragging selected text (or a link/icon) starts an OS drag-and-drop: the
+  // cursor turns into a drag/no-drop cursor and a ghost image follows it, both
+  // drawn by the OS outside this window. Selecting and copying still work.
+  window.addEventListener('dragstart', (e) => e.preventDefault());
   function stripNativeTitles(root = document) {
     root.querySelectorAll('[title]').forEach((el) => el.removeAttribute('title'));
   }

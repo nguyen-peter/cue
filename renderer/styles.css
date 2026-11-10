@@ -32,11 +32,15 @@
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+/* No scrollbar-width / scrollbar-color here: setting either makes Chromium
+   ignore the ::-webkit-scrollbar rules below and fall back to the OS scrollbar
+   (arrow buttons and a square thumb on Windows). */
 * {
   box-sizing: border-box;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.20) transparent;
 }
+/* Form controls do not inherit the page font by default (buttons fell back to
+   the OS dialog font). */
+button, input, select, textarea { font-family: inherit; }
 
 html, body {
   margin: 0;
@@ -60,6 +64,10 @@ html, body {
 input, textarea, select, button, a, .ai-text, .qq-add input, #input, #resize-grip, .drag-pill {
   cursor: default !important;
 }
+/* Same reason: dragging a link, image or icon starts an OS drag-and-drop, which
+   shows a drag cursor and a ghost image. (Dragging selected text is stopped in
+   renderer.js — CSS cannot prevent that one.) */
+a, img, svg { -webkit-user-drag: none; }
 
 ::selection {
   background: rgba(60, 131, 245, 0.38);
@@ -129,7 +137,7 @@ textarea:focus:not(:focus-visible) {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding-top: 14px;
+  padding: 14px 14px 8px;
   pointer-events: none;                  /* only the actual UI blocks; gaps pass through */
 }
 #toolbar, #panel-wrap, #settings-scrim, #onboard-scrim, #consent-scrim { pointer-events: auto; }
@@ -164,6 +172,9 @@ body.app-hidden #consent-scrim {
 #toolbar {
   display: inline-flex;
   align-items: center;
+  flex: none;
+  max-width: 100%;
+  white-space: nowrap;
   gap: 4px;
   padding: 5px 6px;
   border-radius: var(--r-pill);
@@ -199,10 +210,10 @@ body.app-hidden #consent-scrim {
   border: none;
   background: transparent;
   color: #fff;
-  cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex: none;
   transition: background 160ms var(--ease-out), transform 160ms var(--ease-out), color 160ms ease;
 }
 #toolbar button:active { transform: scale(0.94); }
@@ -278,20 +289,24 @@ body.app-hidden #consent-scrim {
 .mic-perm-actions button.dismiss:hover { background: rgba(255, 255, 255, 0.10); color: var(--tx-2); }
 
 /* ============================ Panel ============================ */
+/* The panel always fills the window below the toolbar. It is a size container
+   named "panel": everything inside adapts to the panel's own width and height
+   (see "Responsive panel" at the end of this file), which covers window
+   resizing, Ctrl +/- zoom and the history sidebar taking part of the width. */
 #panel-wrap {
   position: relative;
   margin-top: 12px;
-  width: calc(100vw - 28px);
-  flex: 1 1 auto;
+  width: 100%;
+  flex: 1 1 0;
   min-height: 0;
-  max-height: calc(100vh - 72px);
   display: flex;
   flex-direction: column;
-  transition: width 220ms var(--ease-out), transform 220ms var(--ease-out);
+  container: panel / size;
+  transition: width 220ms var(--ease-out);
 }
 button:focus { outline: none; }
 #live-dot {
-  position: absolute; top: -3px; left: -5px; z-index: 4;
+  position: absolute; top: -3px; left: -3px; z-index: 4;
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--live);
   box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.18), 0 0 6px rgba(34, 197, 94, 0.40);
@@ -312,46 +327,66 @@ button:focus { outline: none; }
     inset 0 1px 0 0 rgba(255, 255, 255, 0.14),
     inset 0 0 16px rgba(255, 255, 255, 0.015);
 }
+/* --panel-pad-x/-y are tightened by the responsive tiers. The top padding stays
+   at 22px in every tier: that band holds the capture status label. */
 #panel {
+  --panel-pad-x: 22px;
+  --panel-pad-y: 18px;
   position: relative;
-  padding: 20px 22px;
+  padding: 22px var(--panel-pad-x) var(--panel-pad-y);
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;                      /* nothing may spill past the rounded glass */
   animation: overlayIn 280ms var(--ease-out);
 }
 #panel.collapsed { display: none; }
 
 /* Resize grip — bottom-right corner of the panel. Dragging it resizes the
-   whole overlay window (wider window = wider panel, taller = more chat room). */
+   whole overlay window (wider window = wider panel, taller = more chat room).
+   It sits inside the panel padding, so it never covers a control. */
 #resize-grip {
-  position: absolute; right: 5px; bottom: 5px;
-  width: 16px; height: 16px;
-  cursor: nwse-resize;
+  position: absolute; right: 3px; bottom: 3px; z-index: 3;
+  width: 14px; height: 14px;
   opacity: 0.35;
-  transition: opacity 160ms ease, transform 160ms ease;
+  transition: opacity 160ms ease;
   background:
-    linear-gradient(135deg, transparent 0 8px, rgba(255, 255, 255, 0.75) 8px 9px, transparent 9px 12px, rgba(255, 255, 255, 0.75) 12px 13px, transparent 13px);
-  border-bottom-right-radius: calc(var(--r-panel) - 6px);
+    linear-gradient(135deg, transparent 0 7px, rgba(255, 255, 255, 0.75) 7px 8px, transparent 8px 10.5px, rgba(255, 255, 255, 0.75) 10.5px 11.5px, transparent 11.5px);
+  border-bottom-right-radius: calc(var(--r-panel) - 5px);
 }
-#resize-grip:hover { opacity: 0.85; transform: scale(1.08); }
-body.resizing { cursor: nwse-resize; }
+#resize-grip:hover { opacity: 0.85; }
 body.resizing #resize-grip { opacity: 0.85; }
 
 /* ============================ Question queue ============================ */
 /* Compact strip above the chat: one line per detected interviewer question.
    Hidden entirely when empty, so it adds zero clutter until it has something. */
-#question-queue { margin-bottom: 10px; animation: fadeUp 200ms var(--ease-out) both; }
-.qq-head { display: flex; align-items: baseline; margin-bottom: 4px; padding: 0 4px; }
+/* Second in line to give up height, after the answers have reached their
+   minimum: it shrinks (and scrolls) down to its heading plus one row. */
+#question-queue {
+  flex: 0 1 auto; min-height: 52px;
+  display: flex; flex-direction: column;
+  margin-bottom: 10px; animation: fadeUp 200ms var(--ease-out) both;
+}
+.qq-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; padding: 0 4px; flex: none; }
 .qq-title {
+  flex: none;
   font-size: 10.5px; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase;
   color: var(--tx-mut);
 }
-.qq-hint { margin-left: auto; font-size: 10.5px; color: var(--tx-mut); }
+.qq-hint {
+  margin-left: auto; min-width: 0; font-size: 10.5px; color: var(--tx-mut);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* The list scrolls on its own once it is taller than about four rows, so a
+   long queue can never push the answer or the input box out of the panel. */
+#qq-list { flex: 0 1 auto; min-height: 31px; max-height: max(31px, min(132px, 34cqh)); overflow-y: auto; }
+#qq-list:empty { min-height: 0; }
+#question-queue:has(#qq-list:empty) { min-height: 0; }
+.qq-add { flex: none; }
 .qq-item {
   display: flex; align-items: center; gap: 8px;
-  padding: 5px 8px; border-radius: 9px; cursor: default;
+  padding: 5px 8px; border-radius: 9px;
   background: rgba(255, 255, 255, 0.025);
   border: 1px solid rgba(255, 255, 255, 0.05);
   margin-bottom: 3px;
@@ -361,7 +396,6 @@ body.resizing #resize-grip { opacity: 0.85; }
 .qq-item:hover {
   background: rgba(60, 131, 245, 0.12);
   border-color: rgba(60, 131, 245, 0.30);
-  transform: translateX(2px);
 }
 .qq-item .keycap { flex: none; min-width: 18px; height: 18px; font-size: 11px; text-align: center; }
 .qq-text {
@@ -370,13 +404,16 @@ body.resizing #resize-grip { opacity: 0.85; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .qq-item:hover .qq-text { color: #fff; }
+/* Edit / dismiss stay in the row (hidden, not removed) so the question text
+   does not re-ellipsize and jump when the mouse passes over a row. */
 .qq-act {
-  flex: none; display: none; align-items: center; justify-content: center;
-  background: transparent; border: none; cursor: pointer;
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; border: none;
   color: var(--tx-mut); padding: 3px; border-radius: 6px;
-  transition: all 140ms ease;
+  visibility: hidden;
+  transition: color 140ms ease, background 140ms ease;
 }
-.qq-item:hover .qq-act { display: inline-flex; }
+.qq-item:hover .qq-act { visibility: visible; }
 .qq-act:hover { color: #fff; background: rgba(255, 255, 255, 0.14); }
 /* Pin marker on pre-typed questions */
 .qq-pin { flex: none; display: inline-flex; color: rgba(143, 181, 247, 0.8); }
@@ -399,19 +436,25 @@ body.resizing #resize-grip { opacity: 0.85; }
 }
 
 /* ============================ Messages ============================ */
+/* The one region that gives way: everything else in the column keeps its
+   size and the answers take whatever height is left. */
 #messages {
   display: flex;
   flex-direction: column;
+  overflow-x: hidden;
   overflow-y: auto;
-  flex: 1 1 auto;
-  min-height: 80px;
+  flex: 1 1 0;
+  min-height: 56px;
+  padding-right: 4px;                    /* keeps bubbles clear of the scrollbar */
 }
+#messages > * { flex-shrink: 0; }
 #messages.hidden {
   display: none !important;
 }
 .user-bubble {
   align-self: flex-end;
-  max-width: 78%;
+  max-width: min(78%, 560px);
+  overflow-wrap: anywhere;
   background: linear-gradient(135deg, #3C83F5 0%, #2563EB 100%);
   color: #fff;
   border-radius: 14px 14px 4px 14px;
@@ -424,6 +467,7 @@ body.resizing #resize-grip { opacity: 0.85; }
   color: var(--tx-1);
   font-size: 17.5px; font-weight: 400; line-height: 1.6; letter-spacing: -0.006em;
   text-align: left; margin: 14px 0 2px;
+  overflow-wrap: anywhere;               /* long URLs / identifiers wrap instead of widening the panel */
   -webkit-user-select: text; user-select: text;
 }
 .ai-text.small { font-size: 15px; line-height: 1.6; }
@@ -564,6 +608,7 @@ body.resizing #resize-grip { opacity: 0.85; }
   display: none; margin: 8px 0 2px; padding: 8px 13px; border-radius: 10px;
   background: rgba(60, 131, 245, 0.12); border: 1px solid rgba(60, 131, 245, 0.30);
   color: #bcd4fb; font-size: 12.5px; line-height: 1.45; -webkit-user-select: text; user-select: text;
+  flex: none; max-height: 24cqh; overflow-y: auto; overflow-wrap: anywhere;
 }
 #cue-status.show { display: block; animation: fadeUp 200ms var(--ease-out) both; }
 
@@ -574,6 +619,7 @@ body.resizing #resize-grip { opacity: 0.85; }
   color: rgba(255, 255, 255, 0.75); font-size: 13px; line-height: 1.4;
   font-style: italic; transition: opacity 200ms ease;
   -webkit-user-select: text; user-select: text;
+  flex: none; max-height: 24cqh; overflow-y: auto; overflow-wrap: anywhere;
 }
 .interim-transcript.show { display: block; animation: fadeUp 160ms var(--ease-out) both; }
 
@@ -589,13 +635,17 @@ body.resizing #resize-grip { opacity: 0.85; }
 }
 
 /* ============================ Action row ============================ */
+/* One line when it fits (the responsive tiers drop the dots, the shortcut
+   hints and finally the secondary labels to keep it that way); wraps onto a
+   second line rather than running off the panel as the last resort. */
 #action-row {
-  display: flex; align-items: center; flex-wrap: nowrap; gap: 5px;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 5px;
+  flex: none; min-width: 0;
   margin-top: 8px; white-space: nowrap;
 }
 .act {
-  display: inline-flex; align-items: center; gap: 6px;
-  border: 1px solid transparent; background: transparent; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 6px; flex: none;
+  border: 1px solid transparent; background: transparent;
   color: var(--tx-2); font-size: 13.5px; font-weight: 500; font-family: var(--font);
   padding: 5px 8px; border-radius: var(--r-8);
   transition: all 160ms var(--ease-out);
@@ -720,16 +770,22 @@ body.resizing #resize-grip { opacity: 0.85; }
 }
 #composer.stt-ready #input { color: rgba(185, 255, 205, 1); }
 
-/* Ready indicator bar at bottom of composer */
+/* Ready indicator: a small chip sitting on the composer's bottom border, so
+   the composer does not need an empty strip reserved underneath it. */
 #composer.stt-ready::after {
   content: '↵ Ready to answer';
   position: absolute;
-  bottom: -20px;
+  bottom: -8px;
   left: 50%;
   transform: translateX(-50%);
+  padding: 1px 8px;
+  border-radius: var(--r-pill);
+  background: #14251d;
+  border: 1px solid rgba(34, 197, 94, 0.45);
   font-size: 10px;
   font-weight: 600;
-  color: rgba(34, 197, 94, 0.9);
+  line-height: 13px;
+  color: rgba(134, 239, 172, 0.95);
   letter-spacing: 0.03em;
   white-space: nowrap;
   pointer-events: none;
@@ -756,8 +812,8 @@ body.resizing #resize-grip { opacity: 0.85; }
 
 #composer {
   position: relative; /* for ::after indicator */
-  margin-top: 14px;
-  margin-bottom: 22px; /* space for ready indicator */
+  flex: none; min-width: 0;
+  margin-top: 12px;
   background: rgba(255, 255, 255, 0.035);
   border: 1px solid rgba(255, 255, 255, 0.11);
   border-radius: var(--r-16);
@@ -771,12 +827,15 @@ body.resizing #resize-grip { opacity: 0.85; }
   background: rgba(255, 255, 255, 0.05);
   box-shadow: 0 0 0 3px rgba(60, 131, 245, 0.15), inset 0 1px 2px rgba(0, 0, 0, 0.2), 0 4px 18px rgba(0, 0, 0, 0.22);
 }
-#input-area { position: relative; min-height: 22px; }
+#input-area { position: relative; min-height: 22px; min-width: 0; }
+/* Single line with an ellipsis: when it wrapped, the second line landed on top
+   of the buttons below it. */
 #placeholder {
   position: absolute; inset: 0; pointer-events: none;
   color: var(--tx-mut); font-size: 15px; line-height: 22px;
-  display: flex; align-items: center; flex-wrap: wrap; gap: 3px;
+  display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+#placeholder .keycap { vertical-align: 1px; margin: 0 2px; }
 #placeholder.hidden { display: none; }
 .keycap {
   display: inline-flex; align-items: center; justify-content: center;
@@ -791,18 +850,24 @@ body.resizing #resize-grip { opacity: 0.85; }
   width: 100%; border: none; outline: none; resize: none;
   background: transparent; color: var(--tx-1);
   font-family: var(--font); font-size: 15px; line-height: 22px;
-  max-height: 140px; overflow-y: auto;
+  display: block;
+  /* renderer.js grows the box up to 140px; in a short panel it is capped at a
+     third of the panel so a long question cannot squeeze the answer out. */
+  max-height: min(140px, max(44px, 32cqh)); overflow-y: auto;
   caret-color: var(--accent-hi);
   -webkit-user-select: text; user-select: text;
 }
-#composer-bottom { display: flex; align-items: center; gap: 8px; }
+/* Wraps only as a last resort (very narrow panel); the tiers below keep it on
+   one line down to the minimum window size. */
+#composer-bottom { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
 .spacer { flex: 1; }
 .smart-pill {
-  display: inline-flex; align-items: center; gap: 6px;
+  display: inline-flex; align-items: center; gap: 6px; flex: none;
   padding: 5px 12px; border-radius: var(--r-pill);
   border: 1px solid rgba(255, 255, 255, 0.16); background: rgba(255, 255, 255, 0.05);
   color: var(--tx-2); font-size: 13px; font-weight: 500; font-family: var(--font);
-  cursor: pointer; transition: all 160ms var(--ease-out);
+  white-space: nowrap;
+  transition: all 160ms var(--ease-out);
 }
 .smart-pill .ic { display: inline-flex; color: var(--ic); transition: transform 160ms ease; }
 .smart-pill:hover { background: rgba(255, 255, 255, 0.09); color: #fff; border-color: rgba(255, 255, 255, 0.24); }
@@ -849,9 +914,9 @@ body.resizing #resize-grip { opacity: 0.85; }
   display: flex;
   flex-direction: column;
   gap: 8px;
-  flex: 1 1 auto;
-  min-height: 80px;
-  margin-bottom: 4px;
+  flex: 1 1 0;
+  min-height: 104px;                     /* header + two lines of notes */
+  min-width: 0;
   padding: 10px 12px;
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.03);
@@ -860,13 +925,17 @@ body.resizing #resize-grip { opacity: 0.85; }
 }
 .notes-panel.hidden { display: none !important; }
 .notes-panel *, .notes-btn { cursor: default !important; }
+/* Title + model badge on the left (the badge shortens with an ellipsis), the
+   three buttons on the right at their natural size. The buttons drop to their
+   own line only when the panel is too narrow for both. */
 .notes-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 6px 8px;
   flex-wrap: wrap;
   flex-shrink: 0;
+  min-width: 0;
   padding-bottom: 6px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
@@ -874,15 +943,21 @@ body.resizing #resize-grip { opacity: 0.85; }
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
+  flex: 1 1 96px;
+  min-width: 0;
 }
 .notes-title {
+  flex: none;
   font-size: 13px;
   font-weight: 700;
   color: #6ee7b7;
   letter-spacing: 0.02em;
 }
 .notes-engine-badge {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 10.5px;
   font-weight: 600;
   padding: 2px 7px;
@@ -895,11 +970,17 @@ body.resizing #resize-grip { opacity: 0.85; }
   display: flex;
   align-items: center;
   gap: 6px;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  min-width: 0;
+  margin-left: auto;
 }
 .notes-btn {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  flex: none;
+  white-space: nowrap;
   padding: 4px 10px;
   font-size: 12px;
   font-weight: 600;
@@ -942,9 +1023,10 @@ body.resizing #resize-grip { opacity: 0.85; }
   color: var(--tx-mut);
 }
 .notes-body {
-  flex: 1 1 auto;
+  display: block;
+  flex: 1 1 0;
   width: 100%;
-  min-height: 80px;
+  min-height: 0;
   resize: none;
   overflow-y: auto;
   outline: none;
@@ -967,30 +1049,10 @@ body.resizing #resize-grip { opacity: 0.85; }
 .notes-body:focus {
   border-color: rgba(16, 185, 129, 0.45);
 }
-.notes-body h3 {
-  font-size: 12.5px;
-  font-weight: 700;
-  color: #93c5fd;
-  margin: 10px 0 4px;
-  letter-spacing: 0.01em;
-}
-.notes-body h3:first-child { margin-top: 2px; }
-.notes-body ul {
-  margin: 2px 0 8px 16px;
-  padding: 0;
-}
-.notes-body li {
-  margin: 3px 0;
-}
-.notes-placeholder {
-  color: var(--tx-mut);
-  font-size: 12.5px;
-  line-height: 1.5;
-  padding: 10px 4px;
-}
 
 /* History button */
 .history-btn {
+  flex: none;
   width: 28px; height: 28px; border-radius: var(--r-8);
   border: none; background: transparent; color: rgba(255, 255, 255, 0.55);
   cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
@@ -1003,6 +1065,7 @@ body.resizing #resize-grip { opacity: 0.85; }
 .history-btn.listening.active { color: var(--live); background: rgba(34, 197, 94, 0.14); }
 
 .more-btn {
+  flex: none;
   width: 28px; height: 28px; border-radius: var(--r-8);
   border: none; background: transparent; color: rgba(255, 255, 255, 0.7);
   cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
@@ -1012,6 +1075,7 @@ body.resizing #resize-grip { opacity: 0.85; }
 .more-btn:active { transform: scale(0.95); }
 
 #send-btn {
+  flex: none;
   width: 32px; height: 32px; border-radius: 50%;
   border: none; background: linear-gradient(135deg, #3C83F5 0%, #2563EB 100%); color: #fff;
   display: grid; place-items: center; cursor: pointer;
@@ -1033,17 +1097,22 @@ body.resizing #resize-grip { opacity: 0.85; }
   -webkit-backdrop-filter: blur(10px);
 }
 #settings-scrim.hidden { display: none; }
+/* Sized from the window with a fixed 12px margin, so it uses the room there is
+   at any window size or zoom. A container ("settings") so its rows can restack
+   when the card itself is narrow. */
 #settings {
-  width: min(488px, 94vw); padding: 20px 22px 22px; -webkit-app-region: no-drag;
-  max-height: 88vh; display: flex; flex-direction: column;
+  width: min(520px, calc(100vw - 24px)); padding: 20px 22px 22px; -webkit-app-region: no-drag;
+  max-height: calc(100vh - 24px); display: flex; flex-direction: column;
+  container: settings / inline-size;
   background: linear-gradient(180deg, rgba(24, 27, 36, 0.94) 0%, rgba(15, 17, 24, 0.92) 100%);
   border: 1px solid rgba(255, 255, 255, 0.13);
   border-radius: 20px;
   box-shadow: 0 24px 60px -8px rgba(0, 0, 0, 0.70), 0 4px 16px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.16);
 }
-.s-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-shrink: 0; }
+.s-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; flex-shrink: 0; }
 .s-title { font-size: 17.5px; font-weight: 650; color: var(--tx-1); letter-spacing: -0.01em; }
 .s-close {
+  flex: none;
   border: none; background: linear-gradient(135deg, #3C83F5 0%, #2563EB 100%); color: #fff;
   font-weight: 600; font-size: 13px; padding: 6px 16px; border-radius: var(--r-pill); cursor: pointer;
   box-shadow: 0 2px 6px rgba(37, 99, 235, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.25);
@@ -1056,9 +1125,14 @@ body.resizing #resize-grip { opacity: 0.85; }
 .s-close:active { transform: scale(0.97); }
 
 /* Tab bar */
-.s-tabs { display: flex; gap: 5px; margin-bottom: 14px; flex-shrink: 0; overflow-x: auto; padding-bottom: 2px; }
+/* All nine tabs are always visible: they wrap onto a second row instead of
+   hiding behind a horizontal scrollbar. */
+.s-tabs { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 14px; flex-shrink: 0; }
+/* Soaks up the spare width of the last row, so its tabs stay the same size as
+   the ones above instead of stretching across the card. */
+.s-tabs::after { content: ''; flex: 1000 1 0; }
 .s-tab {
-  flex: 1; min-width: 72px; padding: 7px 5px; border-radius: 9px;
+  flex: 1 1 auto; padding: 6px 11px; border-radius: 9px;
   border: 1px solid rgba(255, 255, 255, 0.09); background: rgba(255, 255, 255, 0.03);
   color: var(--tx-mut); font-size: 12px; font-weight: 500; font-family: var(--font);
   cursor: pointer; transition: all 160ms var(--ease-out); white-space: nowrap;
@@ -1071,17 +1145,26 @@ body.resizing #resize-grip { opacity: 0.85; }
 }
 
 /* Tab panes */
-.s-tab-pane { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; flex: 1; min-height: 0; }
+/* Scrolls vertically only. The right padding keeps fields clear of the
+   scrollbar; the 3px on the other sides is room for the focus ring, which the
+   scroll box would otherwise clip. */
+.s-tab-pane {
+  display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0;
+  overflow-x: hidden; overflow-y: auto;
+  padding: 3px 8px 3px 3px; margin: -3px -8px -3px -3px;
+}
+.s-tab-pane > * { flex-shrink: 0; min-width: 0; }   /* rows keep their height; the pane scrolls */
 .s-tab-pane.hidden { display: none; }
 
 .s-body { display: flex; flex-direction: column; gap: 8px; }
 .s-label { color: var(--tx-2); font-size: 13px; font-weight: 600; margin-top: 6px; flex-shrink: 0; }
-.s-hint { color: var(--tx-mut); font-weight: 400; font-size: 11px; margin-left: 6px; }
-.s-seg { display: flex; gap: 6px; }
-.s-seg-wrap { flex-wrap: wrap; }
-.s-seg-wrap button { min-width: 76px; }
+.s-hint { color: var(--tx-mut); font-weight: 400; font-size: 11px; margin-left: 6px; overflow-wrap: anywhere; }
+/* Choice buttons sit on an even grid and wrap to as many rows as they need
+   (the provider list has eight). */
+.s-seg { display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); gap: 6px; }
 .s-seg button {
-  flex: 1; padding: 8px; border-radius: 9px;
+  min-width: 0; padding: 8px; border-radius: 9px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(255, 255, 255, 0.04);
   color: var(--tx-2); font-size: 13px; font-weight: 500; cursor: pointer;
   transition: all 160ms var(--ease-out);
@@ -1092,19 +1175,21 @@ body.resizing #resize-grip { opacity: 0.85; }
   background: linear-gradient(180deg, rgba(60, 131, 245, 0.24) 0%, rgba(60, 131, 245, 0.14) 100%);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.15);
 }
-.s-field { display: flex; align-items: center; gap: 10px; }
+.s-field { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .s-field span { width: 78px; color: var(--tx-mut); font-size: 12px; flex-shrink: 0; font-weight: 500; }
-.s-field input {
-  flex: 1; padding: 8px 11px; border-radius: 9px;
+.s-field input, .s-input {
+  flex: 1; min-width: 0; padding: 8px 11px; border-radius: 9px;
   border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(0, 0, 0, 0.30);
   color: var(--tx-1); font-size: 13px; font-family: var(--font); outline: none;
   transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
 }
-.s-field input:focus {
+.s-field input:focus, .s-input:focus {
   border-color: rgba(60, 131, 245, 0.6);
   background: rgba(0, 0, 0, 0.40);
   box-shadow: 0 0 0 3px rgba(60, 131, 245, 0.16);
 }
+.s-input { flex: none; width: 100%; -webkit-user-select: text; user-select: text; }
+.s-field input, .s-field select { -webkit-user-select: text; user-select: text; }
 .s-help { color: var(--tx-mut); font-size: 11px; line-height: 1.45; margin: 4px 0 2px 88px; }
 .s-select {
   width: 100%; padding: 8px 11px; border-radius: 9px;
@@ -1116,7 +1201,7 @@ body.resizing #resize-grip { opacity: 0.85; }
   border-color: rgba(60, 131, 245, 0.6);
   box-shadow: 0 0 0 3px rgba(60, 131, 245, 0.16);
 }
-.s-select.compact { flex: 1; width: auto; }
+.s-select.compact { flex: 1; width: auto; min-width: 0; }
 .s-note { color: var(--tx-mut); font-size: 11.5px; line-height: 1.45; }
 .whisper-card {
   display: flex; flex-direction: column; gap: 9px; margin-top: 6px; padding: 14px;
@@ -1210,13 +1295,16 @@ body.resizing #resize-grip { opacity: 0.85; }
 }
 #onboard-scrim.hidden { display: none; }
 #onboard {
-  width: min(470px, 93vw); padding: 26px 28px 20px; text-align: center;
+  width: min(470px, calc(100vw - 24px)); padding: 26px 28px 20px; text-align: center;
+  max-height: calc(100vh - 24px); display: flex; flex-direction: column;   /* body scrolls; buttons stay in view */
   -webkit-app-region: no-drag; animation: overlayIn 260ms var(--ease-out);
   background: linear-gradient(180deg, rgba(24, 27, 36, 0.94) 0%, rgba(15, 17, 24, 0.92) 100%);
   border: 1px solid rgba(255, 255, 255, 0.13);
   border-radius: 20px;
   box-shadow: 0 24px 60px -8px rgba(0, 0, 0, 0.70), 0 4px 16px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.16);
 }
+#onboard > * { flex: none; }
+#onboard > .ob-body { flex: 0 1 auto; min-height: 40px; overflow-y: auto; padding-right: 4px; }
 .ob-dots { display: flex; gap: 6px; justify-content: center; margin-bottom: 20px; }
 .ob-dots span { width: 7px; height: 7px; border-radius: 50%; background: rgba(255, 255, 255, 0.20); transition: all 220ms ease; }
 .ob-dots span.on { background: var(--accent); width: 22px; border-radius: 4px; box-shadow: 0 0 8px rgba(60, 131, 245, 0.4); }
@@ -1237,7 +1325,7 @@ body.resizing #resize-grip { opacity: 0.85; }
 .ob-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
 .ob-buttons:empty { display: none; }
 .ob-buttons button {
-  flex: 1; min-width: 150px; padding: 10px; border-radius: 10px;
+  flex: 1 1 150px; min-width: 0; padding: 10px; border-radius: 10px;
   border: 1px solid rgba(60, 131, 245, 0.40); background: rgba(60, 131, 245, 0.14);
   color: #cfe0ff; font-size: 13px; font-weight: 600; cursor: pointer;
   transition: all 160ms var(--ease-out);
@@ -1267,22 +1355,33 @@ body.resizing #resize-grip { opacity: 0.85; }
   flex: 1 1 auto;
   min-height: 0;
 }
+/* A column where only the answers (or the notes editor) flex. If the fixed
+   rows alone are taller than the panel — only possible at the smallest window
+   with heavy zoom — the column scrolls rather than hiding the input box. The
+   4px padding / negative margin is room for focus rings inside the scroll box. */
 #panel-main {
   flex: 1;
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 0 4px 4px;
+  margin: 0 -4px -4px;
 }
 
 /* Transcript history sidebar — floats OUTSIDE the main panel */
+/* It lines up with the panel: same top and bottom edge, 10px to its right, and
+   the panel gives up exactly that much width (see #panel-wrap.sidebar-open), so
+   the two never overlap. --sidebar-w scales with the window. */
+:root { --sidebar-w: clamp(200px, 32vw, 300px); }
 .transcript-sidebar {
   position: fixed;
-  top: 80px; /* below toolbar */
-  right: 20px;
-  width: 230px;
-  max-height: 490px;
-  min-height: 200px;
+  top: 65px;    /* = the panel's top edge: 14px + toolbar + 12px */
+  right: 14px;
+  bottom: 8px;
+  width: var(--sidebar-w);
   display: flex;
   flex-direction: column;
   
@@ -1333,7 +1432,10 @@ body.resizing #resize-grip { opacity: 0.85; }
 .ts-close-btn:hover { color: #fff; background: rgba(255, 255, 255, 0.10); transform: scale(1.08); }
 
 .ts-list {
+  overflow-x: hidden;
   overflow-y: auto;
+  overflow-wrap: anywhere;
+  min-height: 0;
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -1350,6 +1452,7 @@ body.resizing #resize-grip { opacity: 0.85; }
 
 /* Each transcript turn — clean, minimal, clickable */
 .ts-turn {
+  flex: none;
   padding: 7px 11px;
   border-radius: 9px;
   font-size: 12.5px;
@@ -1446,10 +1549,20 @@ body.resizing #resize-grip { opacity: 0.85; }
   transform: translateY(0.5px);
 }
 
-/* Sidebar no longer widens panel — it floats outside */
+/* Side by side: the panel keeps its left edge and hands the sidebar its width
+   plus a 10px gap. */
 #panel-wrap.sidebar-open {
-  width: calc(100vw - 260px);
-  transform: translateX(-80px);
+  width: calc(100% - var(--sidebar-w) - 10px);
+  align-self: flex-start;
+}
+/* Narrow window (or zoomed in): there is no room for two columns, so the
+   history opens over the panel instead of crushing it. Closing it (✕ or the
+   history button) brings the panel straight back. */
+@media (max-width: 560px) {
+  .transcript-sidebar { left: 14px; width: auto; }
+  /* Hidden, not just covered: the sidebar glass is translucent, and the panel's
+     buttons must not show through it or take clicks around its edges. */
+  #panel-wrap.sidebar-open { width: 100%; visibility: hidden; }
 }
 
 /* ============================ Transcript viewer ============================ */
@@ -1466,12 +1579,20 @@ body.resizing #resize-grip { opacity: 0.85; }
 .transcript-placeholder { color: var(--tx-mut); font-size: 12px; font-style: italic; padding: 4px 0; }
 
 /* Toast */
+/* Sits across the panel's top edge, in the gap under the toolbar plus the
+   panel's empty top band, so it never covers a button or the input box. It
+   shortens with an ellipsis instead of running off the window. */
+/* Centred with auto margins, not translateX(-50%): the fadeUp animation ends
+   on "transform: none", which used to cancel the centring and leave the toast
+   hanging off the right edge. */
 #toast {
-  display: none; position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+  display: none; position: fixed; top: 55px; left: 0; right: 0;
+  width: fit-content; margin: 0 auto;
+  max-width: calc(100vw - 48px); overflow: hidden; text-overflow: ellipsis;
   background: linear-gradient(180deg, rgba(22, 25, 33, 0.94) 0%, rgba(14, 16, 22, 0.92) 100%);
   border: 1px solid rgba(255, 255, 255, 0.16);
   color: var(--tx-1); font-size: 13px; font-weight: 500;
-  padding: 8px 18px; border-radius: var(--r-pill);
+  padding: 6px 16px; line-height: 17px; border-radius: var(--r-pill);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.50), inset 0 1px 0 rgba(255, 255, 255, 0.18);
   z-index: 50; white-space: nowrap; pointer-events: none;
   backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
@@ -1480,14 +1601,20 @@ body.resizing #resize-grip { opacity: 0.85; }
 .act-clear:hover { color: #fca5a5 !important; background: rgba(239, 68, 68, 0.08) !important; }
 
 /* ============================ Prep status ============================ */
+/* Always one row, so its height never changes. The narrow tier tightens the
+   chips so all seven fit at the minimum window size; below that the row
+   scrolls sideways (Shift + wheel / trackpad) without a visible scrollbar. */
 .prep-status {
-  display: flex; gap: 8px; flex-wrap: wrap;
-  margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--bd-hair);
+  display: flex; gap: 6px; flex-wrap: nowrap; flex: none; min-width: 0;
+  margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--bd-hair);
+  overflow-x: auto; overflow-y: hidden;
 }
+.prep-status::-webkit-scrollbar { display: none; }
 .prep-item {
+  flex: none; white-space: nowrap;
   font-size: 11px; font-weight: 550; padding: 2.5px 9px;
   border-radius: var(--r-pill); border: 1px solid transparent;
-  transition: all 160ms var(--ease-out); cursor: pointer;
+  transition: all 160ms var(--ease-out);
 }
 .prep-item.loaded {
   color: #86efac; border-color: rgba(34, 197, 94, 0.30);
@@ -1524,8 +1651,10 @@ body.resizing #resize-grip { opacity: 0.85; }
 }
 
 /* ============================ STT status ============================ */
+/* Lives in the panel's top padding band (22px), above the first row of
+   content — it used to sit on top of the "Questions" heading. */
 #stt-status {
-  position: absolute; top: 14px; left: 14px; z-index: 4;
+  position: absolute; top: 6px; left: 16px; z-index: 4; line-height: 11px;
   font-size: 9px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
   white-space: nowrap; pointer-events: none;
 }
@@ -1586,7 +1715,8 @@ body.resizing #resize-grip { opacity: 0.85; }
 }
 #consent-scrim.hidden { display: none; }
 #consent {
-  width: min(430px, 92vw); padding: 26px 28px 18px; text-align: center;
+  width: min(430px, calc(100vw - 24px)); padding: 26px 28px 18px; text-align: center;
+  max-height: calc(100vh - 24px); display: flex; flex-direction: column;   /* body scrolls; buttons stay in view */
   -webkit-app-region: no-drag; animation: overlayIn 260ms var(--ease-out);
   background: linear-gradient(180deg, rgba(24, 27, 36, 0.94) 0%, rgba(15, 17, 24, 0.92) 100%);
   border: 1px solid rgba(255, 255, 255, 0.13);
@@ -1594,8 +1724,12 @@ body.resizing #resize-grip { opacity: 0.85; }
   box-shadow: 0 24px 60px -8px rgba(0, 0, 0, 0.70), 0 4px 16px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.16);
 }
 .cs-title { font-size: 15.5px; font-weight: 650; color: var(--tx-1); line-height: 1.35; }
-.cs-body { margin-top: 10px; color: var(--tx-mut); font-size: 13px; line-height: 1.55; white-space: pre-line; }
-.cs-actions { display: flex; gap: 10px; justify-content: center; margin-top: 20px; }
+.cs-title { flex: none; overflow-wrap: anywhere; }
+.cs-body {
+  margin-top: 10px; color: var(--tx-mut); font-size: 13px; line-height: 1.55; white-space: pre-line;
+  flex: 0 1 auto; min-height: 30px; overflow-y: auto; overflow-wrap: anywhere;
+}
+.cs-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-top: 20px; flex: none; }
 
 /* ============================ Phone Companion QR Card ============================ */
 .phone-qr-card {
@@ -1640,4 +1774,140 @@ body.resizing #resize-grip { opacity: 0.85; }
 .prep-item.phone-chip:hover {
   background: rgba(60, 131, 245, 0.22) !important;
   color: #dbeafe !important;
+}
+
+/* ============================ Responsive panel ============================ */
+/* Everything below reacts to the size of the panel itself (container "panel"
+   on #panel-wrap), in CSS pixels. That one mechanism covers all three ways the
+   panel changes size: resizing the window (460x360 minimum), Ctrl +/- zoom
+   (0.75x - 1.75x), and the history sidebar taking part of the width.
+
+   Width, widest first. Each tier only removes decoration or tightens spacing;
+   every control stays on screen and clickable.
+     > 640px   everything shown
+     <= 640px  the "•" dividers between the actions go
+     <= 560px  the keyboard-shortcut hints inside the action buttons go
+     <= 470px  tighter padding; icons on the pills and secondary actions go
+               (labels stay — there are no tooltips to explain a bare icon)
+     <= 380px  smallest spacing; rows may wrap onto a second line            */
+@container panel (max-width: 640px) {
+  #action-row .sep { display: none; }
+  #action-row { gap: 6px; }
+}
+@container panel (max-width: 560px) {
+  .act .shortcut-hint { display: none; }
+  .ai-text { font-size: 16.5px; }
+}
+@container panel (max-width: 470px) {
+  #panel { --panel-pad-x: 14px; }
+  #action-row { gap: 4px; }
+  .act { padding: 5px 7px; font-size: 13px; }
+  .act-primary { padding: 6px 10px; font-size: 13px; }
+  .act-secondary { padding: 5px 9px; }
+  .act:not(.act-primary) > .ic { display: none; }
+  #composer { padding: 10px 12px; }
+  #composer-bottom { gap: 6px; }
+  .smart-pill { padding: 5px 10px; }
+  .smart-pill > .ic { display: none; }
+  .prep-status { gap: 4px; }
+  .prep-item { padding: 2px 7px; font-size: 10.5px; }
+  .notes-panel { padding: 8px 10px; }
+  .notes-btn { padding: 4px 8px; }
+  .ai-text { font-size: 15.5px; }
+  .ai-text.small { font-size: 14px; }
+  .user-bubble { max-width: 88%; font-size: 13.5px; padding: 7px 12px; }
+  #placeholder, #input { font-size: 14px; }
+}
+@container panel (max-width: 380px) {
+  #panel { --panel-pad-x: 10px; }
+  .act, .act-primary { font-size: 12.5px; }
+  .act-primary { padding: 5px 9px; }
+  #composer { padding: 9px 10px; }
+  #composer-bottom { gap: 5px; }
+  .smart-pill { padding: 4px 8px; font-size: 12.5px; }
+  .history-btn, .more-btn { width: 24px; height: 24px; }
+  #send-btn { width: 28px; height: 28px; }
+  .notes-head-actions { margin-left: 0; }
+  .ai-text { font-size: 14.5px; }
+}
+
+/* Height. The answers / notes area is what shrinks; these tiers give it back
+   as much room as possible when the panel is short.
+     <= 420px  tighter vertical spacing
+     <= 320px  (minimum window height) the prep chips and the queue heading go,
+               and status / live-transcript lines show one line and scroll.
+               Prep is still reachable from the "..." button.                  */
+@container panel (max-height: 420px) {
+  #panel { --panel-pad-y: 12px; }
+  #question-queue { margin-bottom: 6px; }
+  #action-row { margin-top: 6px; }
+  #composer { margin-top: 8px; padding-top: 9px; padding-bottom: 9px; gap: 7px; }
+  .prep-status { margin-top: 7px; padding-top: 6px; }
+  .notes-panel { gap: 6px; }
+  #messages { min-height: 32px; }
+  #qq-list { max-height: 62px; }         /* two rows, then it scrolls */
+  .ai-text { margin-top: 8px; }
+  #cue-status, .interim-transcript { margin-top: 5px; padding-top: 5px; padding-bottom: 5px; }
+}
+@container panel (max-height: 320px) {
+  .prep-status, .qq-head { display: none; }
+  #question-queue { min-height: 31px; }
+  #messages { min-height: 24px; }
+  #cue-status, .interim-transcript { max-height: 28px; }   /* one line, then it scrolls */
+  .notes-panel { min-height: 84px; padding-top: 7px; padding-bottom: 7px; }
+  .notes-head { padding-bottom: 5px; }
+}
+
+/* Toolbar: on a very narrow viewport (zoomed in at the minimum window size)
+   the word "Drag" goes so the bar still fits; the dotted grip stays. */
+@media (max-width: 310px) {
+  .drag-label { display: none; }
+  .tb-divider { margin: 0; }
+  .tb-hide { padding: 5px 8px 5px 6px; }
+}
+
+/* ============================ Responsive settings / dialogs ============================ */
+.s-action, .s-upload-btn, .s-caller button, .ob-ghost, .ob-primary { flex: none; white-space: nowrap; }
+.whisper-runtime-row .s-label { min-width: 0; }
+.phone-qr-card .s-field { flex-wrap: wrap; }
+.phone-qr-card .s-field input { flex: 1 1 140px; }
+@container settings (max-width: 400px) {
+  /* Label above its field instead of a fixed 78px column beside it. */
+  .s-field:not(.s-upload) { flex-wrap: wrap; gap: 4px 10px; }
+  .s-field:not(.s-upload) > span { width: 100%; }
+  .s-help { margin-left: 0; }
+  .s-hint { display: block; margin: 2px 0 0; }
+  .phone-qr-card { flex-direction: column; align-items: stretch; }
+  .phone-qr-wrap { align-self: center; }
+  .s-upload { flex-wrap: wrap; }
+}
+@media (max-width: 440px) {
+  #settings { padding: 14px 14px 16px; border-radius: 16px; }
+  #onboard, #consent { padding: 18px 16px 14px; border-radius: 16px; }
+  .s-head { margin-bottom: 10px; }
+  .s-tabs { margin-bottom: 10px; }
+  .ob-dots { margin-bottom: 12px; }
+  .ob-icon { margin-bottom: 8px; }
+  .ob-actions { margin-top: 14px; }
+  .cs-actions { margin-top: 14px; }
+}
+@media (max-height: 420px) {
+  #settings { padding-top: 14px; padding-bottom: 14px; }
+  .s-head { margin-bottom: 8px; }
+  .s-title { font-size: 15.5px; }
+  .s-close { padding: 5px 14px; }
+  .s-tabs { margin-bottom: 10px; gap: 4px; }
+  .s-tab { padding: 4px 9px; }
+  .ob-dots { margin-bottom: 10px; }
+  .ob-icon { display: none; }
+  .ob-actions, .cs-actions { margin-top: 12px; }
+  .ob-buttons { margin-top: 10px; }
+  .ob-buttons button { padding: 7px 10px; }
+}
+/* Extremely short viewport (minimum window zoomed right in): the fixed rows of
+   a dialog no longer fit, so the whole card scrolls instead of its body. */
+@media (max-height: 300px) {
+  #settings, #onboard, #consent { overflow-x: hidden; overflow-y: auto; }
+  #settings > *, #onboard > .ob-body, #consent > .cs-body { flex: none; }
+  .s-tab-pane { overflow: visible; }
 }
