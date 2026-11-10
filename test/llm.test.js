@@ -389,6 +389,52 @@ test('GPT-5 keeps full reasoning on Smart tier and LeetCode', async () => {
   assert.equal(capturedCompletionRequest.reasoning_effort, undefined);
 });
 
+const QUICK_SPLIT = { gemini: { fast: 'gemini-3.8-flash', smart: 'gemini-3.8-flash', quick: 'gemini-3.5-flash-lite' } };
+
+test('Quick mode sends Quick-prompt modes to the Quick model', async () => {
+  const llm = createLLM(geminiSettings({ quick: true, models: QUICK_SPLIT }));
+  for (const mode of ['ask', 'say', 'assist', 'answerThis']) {
+    assert.equal(llm.modelFor(mode), 'gemini-3.5-flash-lite');
+    await llm.stream({ system: 's', turns: [{ role: 'user', text: 'hi' }], mode, onToken: () => {} });
+    assert.equal(capturedGeminiRequest.model, 'gemini-3.5-flash-lite');
+  }
+  // Flash-Lite's own thinking level, not the one picked for the main model.
+  assert.deepEqual(capturedGeminiRequest.config.thinkingConfig, { thinkingLevel: 'MINIMAL', includeThoughts: true });
+});
+
+test('Quick model never handles LeetCode, followups or recaps', async () => {
+  const llm = createLLM(geminiSettings({ quick: true, models: QUICK_SPLIT }));
+  for (const mode of ['leetcode', 'followup', 'recap']) {
+    await llm.stream({ system: 's', turns: [{ role: 'user', text: 'solve' }], mode, onToken: () => {} });
+    assert.equal(capturedGeminiRequest.model, 'gemini-3.8-flash');
+  }
+});
+
+test('Quick model is ignored when Quick is off, blank, or a retired id', async () => {
+  const off = createLLM(geminiSettings({ quick: false, models: QUICK_SPLIT }));
+  await off.stream({ system: 's', turns: [{ role: 'user', text: 'hi' }], mode: 'ask', onToken: () => {} });
+  assert.equal(capturedGeminiRequest.model, 'gemini-3.8-flash');
+
+  const blank = createLLM(geminiSettings({ quick: true, models: { gemini: { fast: 'gemini-3.8-flash', smart: 'gemini-3.8-flash', quick: '  ' } } }));
+  assert.equal(blank.modelFor('ask'), 'gemini-3.8-flash');
+
+  const retired = createLLM(geminiSettings({ quick: true, models: { gemini: { fast: 'gemini-3.8-flash', smart: 'gemini-3.8-flash', quick: 'gemini-2.0-flash' } } }));
+  assert.equal(retired.modelFor('ask'), 'gemini-3.8-flash');
+});
+
+test('Quick model applies to OpenAI-compatible providers too', async () => {
+  const llm = createLLM({
+    provider: 'openai',
+    quick: true,
+    apiKeys: { openai: 'k' },
+    models: { openai: { fast: 'gpt-5.4', smart: 'gpt-5.4', quick: 'gpt-5.4-mini' } }
+  });
+  await llm.stream({ system: '', turns: [{ role: 'user', text: 'hi' }], mode: 'ask', onToken: () => {} });
+  assert.equal(capturedCompletionRequest.model, 'gpt-5.4-mini');
+  await llm.stream({ system: '', turns: [{ role: 'user', text: 'solve' }], mode: 'leetcode', onToken: () => {} });
+  assert.equal(capturedCompletionRequest.model, 'gpt-5.4');
+});
+
 // gemini-2.5-flash-lite is the one 2.5 Flash model Google still serves without
 // a shutdown date, so it stands in for the 2.5-era thinkingBudget code path.
 const LEGACY_FLASH = { gemini: { fast: 'gemini-2.5-flash-lite', smart: 'gemini-2.5-flash-lite' } };

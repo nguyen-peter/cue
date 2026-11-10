@@ -5,7 +5,7 @@ const store = require('./src/store');
 const { captureScreenshot } = require('./src/screen');
 const { createSTT, looksLikeHallucination, buildVocabPrompt } = require('./src/stt');
 const { parseDocumentFile } = require('./src/resume');
-const { createLLM } = require('./src/llm');
+const { createLLM, QUICK_MODES } = require('./src/llm');
 const { MODES, LEETCODE_DEFAULT_INSTRUCTIONS, QUICK_GOTCHA_SYSTEM, buildQuickTurn } = require('./src/prompts');
 const { rms16, findQuietCut } = require('./src/wav');
 const { createStreamingSTT } = require('./src/stt-streaming');
@@ -820,7 +820,7 @@ async function runFeature(mode, userText, opts) {
   try {
     const settings = store.getSettings();
     const llm = createLLM(settings);
-    trace = createTrace('qna', { mode, provider: settings.provider, model: llm.model });
+    trace = createTrace('qna', { mode, provider: settings.provider, model: llm.modelFor(mode) });
     const userBubble = def.userBubble !== null
       ? def.userBubble
       : (mode === 'ask' ? userText : mode === 'answerThis' ? `"${(userText || '').slice(0, 60)}${userText && userText.length > 60 ? '…' : ''}"` : null);
@@ -834,7 +834,7 @@ async function runFeature(mode, userText, opts) {
       return;
     }
 
-    const isQuickMode = !!settings.quick && (mode === 'ask' || mode === 'say' || mode === 'assist' || mode === 'answerThis');
+    const isQuickMode = !!settings.quick && QUICK_MODES.has(mode);
     const isRecallOrSynthesis = /synthesis|synthesize|recommendation|conclusion|recap|summary|summarize|entire case|whole case|all findings|from (the )?beginning|earlier|previous|first question|what did (we|you) (say|calculate)/i.test(userText || '');
     const isShortFollowup = /^(make (that|it) shorter|shorter\b|explain that|what does that mean|give me an example|more detail)/i.test((userText || '').trim());
     // Quick mode keeps the last 2 exchanges (small, capped by chat-history truncation)

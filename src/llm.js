@@ -121,6 +121,10 @@ const DEFAULT_SMART_MODELS = {
 const DEAD_GEMINI_MODEL_RE = /^gemini-(?:(?:1\.0|1\.5|2\.0)(?:-|$)|2\.5-flash(?!-lite)(?:-|$))/i;
 const RETIRED_ANTHROPIC_MODEL_RE = /^claude-(?:instant|[123])(?:[.-]|$)/i;
 
+// Modes that get the context-free Quick prompt when Quick is on. LeetCode is
+// deliberately absent so hard problems always reach the main model.
+const QUICK_MODES = new Set(['ask', 'say', 'assist', 'answerThis']);
+
 const PROVIDER_LABELS = { azure: 'Azure AI Foundry', openai: 'OpenAI', minimax: 'MiniMax' };
 
 function normalizeProviderName(provider) {
@@ -543,6 +547,11 @@ function createLLM(settings) {
   if (provider === 'gemini' && DEAD_GEMINI_MODEL_RE.test(model || '')) model = '';
   if (provider === 'anthropic' && RETIRED_ANTHROPIC_MODEL_RE.test(model || '')) model = '';
   if (!model) model = (tier === 'smart' && DEFAULT_SMART_MODELS[provider]) || DEFAULT_MODELS[provider] || '';
+  // Optional model for Quick mode only; blank means Quick uses the tier model.
+  let quickModel = String((models[provider] || {}).quick || '').trim();
+  if (provider === 'gemini' && DEAD_GEMINI_MODEL_RE.test(quickModel)) quickModel = '';
+  if (provider === 'anthropic' && RETIRED_ANTHROPIC_MODEL_RE.test(quickModel)) quickModel = '';
+  const modelFor = (mode) => (settings.quick && QUICK_MODES.has(mode) && quickModel) || model;
   const minimaxRegion = settings.minimaxRegion || 'global_en';
   const endpoint = settings.azureEndpoint || '';
 
@@ -589,7 +598,8 @@ function createLLM(settings) {
   }
 
   return {
-    provider, model, apiKey, baseURL,
+    provider, model, quickModel, apiKey, baseURL,
+    modelFor,
     ready,
     configurationError,
     // Pre-open the TCP+TLS connection to the provider while the screenshot is
@@ -609,7 +619,8 @@ function createLLM(settings) {
       if (!ready) throw new Error(configurationError || `Complete the ${provider} provider settings.`);
       const isQuick = !!settings.quick && params.mode !== 'leetcode';
       const effectiveSmart = isQuick ? false : !!settings.smart;
-      const args = { apiKey, baseURL, endpoint, model, numCtx: settings.notesContextTokens, ...params, turns: sanitizeTurns(params.turns) };
+      const activeModel = modelFor(params.mode);
+      const args = { apiKey, baseURL, endpoint, model: activeModel, numCtx: settings.notesContextTokens, ...params, turns: sanitizeTurns(params.turns) };
       // Caller can pass maxTokens explicitly (tests); otherwise size the cap
       // to the mode. LeetCode needs a much larger budget than Assist.
       if (params.maxTokens == null) args.maxTokens = isQuick ? 1400 : tokenBudget(params.mode, effectiveSmart);
@@ -617,14 +628,14 @@ function createLLM(settings) {
       // LeetCode always keeps some thinking (answer depth), bounded so hidden
       // tokens cannot eat maxOutputTokens and cut the walkthrough off.
       args.thinkingConfig = provider === 'gemini'
-        ? geminiThinkingConfig(model, params.mode, effectiveSmart)
+        ? geminiThinkingConfig(activeModel, params.mode, effectiveSmart)
         : undefined;
       // Fast-tier GPT-5 / o-series: skip the long hidden reasoning pass. Smart
       // and LeetCode keep the provider default so hard problems stay deep.
       args.reasoningEffort = (provider === 'openai' || provider === 'azure')
         && !effectiveSmart
         && params.mode !== 'leetcode'
-        && isReasoningChatModel(model)
+        && isReasoningChatModel(activeModel)
         ? 'low'
         : undefined;
       const dispatch = (a) => {
@@ -655,7 +666,7 @@ function createLLM(settings) {
             await new Promise((resolve) => setTimeout(resolve, retryDelays[attempt]));
             continue;
           }
-          throw new Error(formatProviderErrorMessage(error, provider, model));
+          throw new Error(formatProviderErrorMessage(error, provider, activeModel));
         }
       }
     }
@@ -664,6 +675,7 @@ function createLLM(settings) {
 
 module.exports = {
   createLLM,
+  QUICK_MODES,
   formatProviderErrorMessage,
   isQuotaError,
   isOverloadedError,

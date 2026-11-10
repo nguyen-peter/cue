@@ -58,17 +58,18 @@ const DEFAULTS = {
   // Larger lets it read more of the notes per update, at the cost of speed and
   // memory. See notesBudget() in src/notes.js.
   notesContextTokens: 4096,
+  // quick: optional model for Quick mode only; blank uses the Fast model.
   models: {
-    openai: { fast: 'gpt-4o-mini', smart: 'gpt-4o' },
+    openai: { fast: 'gpt-4o-mini', smart: 'gpt-4o', quick: '' },
     // Kept in sync with DEFAULT_MODELS / DEFAULT_SMART_MODELS in src/llm.js,
     // which also explains why these ids were chosen and when they were checked.
-    anthropic: { fast: 'claude-haiku-5-5', smart: 'claude-sonnet-5-5' },
-    gemini: { fast: 'gemini-3.5-flash-lite', smart: 'gemini-3.8-flash' },
-    custom: { fast: '', smart: '' },
-    ollama: { fast: 'llama3.2', smart: 'llama3.3' },
-    groq: { fast: 'llama-3.1-8b-instant', smart: 'llama-3.3-70b-versatile' },
-    minimax: { fast: 'MiniMax-M2.7', smart: 'MiniMax-M3' },
-    azure: { fast: 'gpt-4o-mini', smart: 'gpt-4o' }
+    anthropic: { fast: 'claude-haiku-5-5', smart: 'claude-sonnet-5-5', quick: '' },
+    gemini: { fast: 'gemini-3.5-flash-lite', smart: 'gemini-3.8-flash', quick: '' },
+    custom: { fast: '', smart: '', quick: '' },
+    ollama: { fast: 'llama3.2', smart: 'llama3.3', quick: '' },
+    groq: { fast: 'llama-3.1-8b-instant', smart: 'llama-3.3-70b-versatile', quick: '' },
+    minimax: { fast: 'MiniMax-M2.7', smart: 'MiniMax-M3', quick: '' },
+    azure: { fast: 'gpt-4o-mini', smart: 'gpt-4o', quick: '' }
   }
 };
 

@@ -2013,7 +2013,7 @@
     $('#key-azure').value = settings.apiKeys.azure || '';
     $('#azure-endpoint').value = settings.azureEndpoint || '';
     const m = settings.models[settings.provider] || { fast: '', smart: '' };
-    $('#model-fast').value = m.fast; $('#model-smart').value = m.smart;
+    $('#model-fast').value = m.fast; $('#model-smart').value = m.smart; $('#model-quick').value = m.quick || '';
     fillAppLinkCallers();
     $('#s-status').textContent = statusText();
     // Transcription tab
@@ -2140,7 +2140,7 @@
     document.querySelectorAll('#provider-seg button').forEach((x) => x.classList.toggle('on', x === b));
     updateCustomProviderFields();
     const m = settings.models[settings.provider] || { fast: '', smart: '' };
-    $('#model-fast').value = m.fast; $('#model-smart').value = m.smart;
+    $('#model-fast').value = m.fast; $('#model-smart').value = m.smart; $('#model-quick').value = m.quick || '';
     $('#s-status').textContent = statusText();
   }));
   document.querySelectorAll('#minimax-region-seg button').forEach((b) => b.addEventListener('click', () => {
@@ -2393,6 +2393,7 @@
     if (!settings.models[settings.provider]) settings.models[settings.provider] = {};
     settings.models[settings.provider].fast = $('#model-fast').value.trim();
     settings.models[settings.provider].smart = $('#model-smart').value.trim();
+    settings.models[settings.provider].quick = $('#model-quick').value.trim();
     // Transcription
     if (!settings.localWhisper) settings.localWhisper = {};
     settings.localWhisper.modelId = $('#whisper-model').value || settings.localWhisper.modelId || 'base.en';
