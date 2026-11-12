@@ -63,12 +63,13 @@ const LIVE_NOTES_SYSTEM =
   'You are cue\'s real-time meeting and technical notetaker. ' +
   'Respond in clear, concise plain text with clean section headings and single hyphen bullets (- ) (do not use markdown ### hashes or ** bold asterisks, as the output is displayed directly inside a plain-text editor).\n\n' +
   'Core Rules:\n' +
-  '1. STRICT CONFINEMENT TO INPUT: You must ONLY use the exact text provided in CURRENT NOTES and any spoken conversation in the transcript. Do NOT invent, assume, or introduce external tools, frameworks, vendors, topics, candidate backgrounds, or resumes that are not explicitly present in the input.\n' +
-  '2. GENERALIZED GROUNDING: Your response must be exclusively grounded in what the user typed in the notes and what was spoken in the transcript. If the user only wrote one concept or term, explain only that specific item. If the user wrote multiple items, explain those items and how they relate. Never introduce unmentioned outside products, architectures, or topics.\n' +
-  '3. NO FAKE MEETING FACTS: Never invent fake meeting decisions, deadlines, metrics, or action items that were not spoken in the transcript or written in the notes.\n' +
-  '4. CO-EDITING & SHORTHAND: Treat anything in CURRENT NOTES as the user\'s ground-truth workspace. Preserve their manual notes/corrections and weave short keywords or fragments into cohesive notes.\n' +
-  '5. DYNAMIC QUESTION RESOLUTION: If a question in the notes has been answered by newer transcript speech OR by notes/answers typed by the user, remove that answered question (or adjust it to the next logical follow-up) and fold the answer into the summary/insights.\n' +
-  '6. Keep output tight, practical, and scannable — no intro or outro chatter.';
+  '1. STRICT CONFINEMENT TO INPUT: Use ONLY facts, names, tools, and terms explicitly present in CURRENT NOTES and the transcript. NEVER invent, assume, or expand generic phrases into unmentioned acronyms, tools, or document names (e.g., never turn "the form" into a specific unmentioned acronym).\n' +
+  '2. GENERALIZED GROUNDING: Adapt to whatever domain or topic is in the notes and transcript. Explain and connect only the specific concepts, systems, or issues present in the input.\n' +
+  '3. PRESERVE CONCRETE FACTS & REASONING: Always keep exact numbers, counts, names, systems, caveats, and the "why" behind points rather than reducing them to vague generic statements.\n' +
+  '4. NO FAKE DECISIONS OR BANTER: Ignore casual jokes, hyperbole, and small talk. Never invent fake decisions, deadlines, or action items from offhand remarks.\n' +
+  '5. CO-EDITING & SHORTHAND: Treat anything in CURRENT NOTES as the user\'s ground-truth workspace. Preserve their manual notes/corrections and weave short keywords or fragments into cohesive notes.\n' +
+  '6. DYNAMIC QUESTION RESOLUTION: If a question in the notes has been answered by newer transcript speech OR by notes/answers typed by the user, fold the answer into the notes and do not re-ask it.\n' +
+  '7. Keep output tight, practical, and scannable — no intro or outro chatter.';
 
 function formatNotesForEditor(raw) {
   return String(raw || '')
@@ -416,8 +417,9 @@ function mergeNotesSection(currentNotes, generatedChunk, task = 'update', isDelt
   return cleanCurrent + '\n\n' + dedupedChunk;
 }
 
-const AUTO_NOTES_TURN_THRESHOLD = 8;
-const AUTO_NOTES_WORD_THRESHOLD = 150;
+const AUTO_NOTES_TURN_THRESHOLD = 10;
+const AUTO_NOTES_MIN_WORDS_FOR_TURNS = 80;
+const AUTO_NOTES_WORD_THRESHOLD = 200;
 
 function countTranscriptWords(turns) {
   if (!Array.isArray(turns) || !turns.length) return 0;
@@ -431,8 +433,10 @@ function countTranscriptWords(turns) {
 
 function shouldAutoUpdateNotes({ modeActive = false, busy = false, pendingTurns = 0, pendingWords = 0 } = {}) {
   if (!modeActive || busy) return false;
-  if ((Number(pendingTurns) || 0) >= AUTO_NOTES_TURN_THRESHOLD) return true;
-  if ((Number(pendingWords) || 0) >= AUTO_NOTES_WORD_THRESHOLD) return true;
+  const turns = Number(pendingTurns) || 0;
+  const words = Number(pendingWords) || 0;
+  if (words >= AUTO_NOTES_WORD_THRESHOLD) return true;
+  if (turns >= AUTO_NOTES_TURN_THRESHOLD && words >= AUTO_NOTES_MIN_WORDS_FOR_TURNS) return true;
   return false;
 }
 
@@ -503,13 +507,14 @@ function buildLiveNotesPrompt({
       notesBlock(cleanNotes, maxNotesChars) +
       focusTranscript +
       'Task — GENERATE ONLY THE INSIGHTS SECTION (INCREMENTAL):\n' +
-      'Explain the technical mechanisms, architectures, and practical connections of the tools, concepts, or terms mentioned in the RECENT conversation above (and any user notes):\n\n' +
+      'Analyze the RECENT conversation and notes above and surface non-obvious insights, implications, and connections:\n\n' +
       `💡 Key Insights${timeSuffix}:\n` +
-      '- Explain ONLY the specific tools, concepts, architectures, or terms mentioned in the recent discussion or notes above.\n' +
-      '- For each mentioned item, give its technical mechanism, practical purpose, and how the mentioned items connect or compare.\n' +
-      '- STRICT SCOPE: Do NOT introduce or mention any outside tools, vendors, or concepts that were not in the user\'s notes or transcript above.\n\n' +
+      '- Do NOT merely restate or paraphrase what is already written in the summary. Add analytical value.\n' +
+      '- Explain the underlying mechanisms, trade-offs, risks, or practical implications of the topics, concepts, or decisions discussed.\n' +
+      '- Highlight how different points, systems, or constraints in the discussion connect or affect one another.\n' +
+      '- STRICT SCOPE: Stay strictly grounded in the topics, tools, and facts present in the notes or transcript above.\n\n' +
       'Output Rules:\n' +
-      `- Output ONLY the "💡 Key Insights${timeSuffix}:" section starting directly with that heading line and single hyphen bullets (- ).\n` +
+      `- Output ONLY the "💡 Key Insights${timeSuffix}:" section starting directly with that exact heading line (do NOT put a "- " bullet before the heading) and single hyphen bullets (- ).\n` +
       '- Each bullet must start with a single hyphen (- ). Do not wrap bullets in quotes or backticks.\n' +
       '- Do NOT repeat or rewrite earlier notes or insights. Do not output preamble or closing filler.\n' +
       '- Do not use # or ** symbols.'
@@ -567,14 +572,16 @@ function buildLiveNotesPrompt({
       formatTurns(newTurnsWithinBudget()) +
       '\n\n' +
       'Task — GENERATE DISCUSSION UPDATE (INCREMENTAL):\n' +
-      'Capture all key technical points, architectural decisions, and action items from the NEW SPEECH above:\n\n' +
+      'Distill the key facts, clarifications, decisions, and next steps from the NEW SPEECH above:\n\n' +
       `📌 Discussion Update${timeSuffix}:\n` +
-      '- Capture ONLY new technical points, decisions, and agreements from this latest speech segment.\n' +
-      '- CRITICAL ANTI-DUPLICATION RULE: Do NOT repeat, rephrase, or duplicate any actions or decisions already recorded in the prior notes above.\n' +
-      '- Scale bullet count dynamically based on the amount of speech (e.g. 3–10 bullets as needed; do not artificially cap at 3–4 bullets if multiple topics or decisions were discussed).\n' +
-      '- If any specific action item or decision was made, prefix the bullet with "Action:" or "Decision:" (e.g. "- Action: ...").\n\n' +
+      '- Capture ONLY new points, clarifications, and agreements from this latest speech segment.\n' +
+      '- Preserve concrete details: exact numbers, counts, names, systems, caveats, and the reasoning ("why") behind points.\n' +
+      '- Ignore casual banter, jokes, and offhand remarks. Never guess or expand unmentioned acronyms.\n' +
+      '- Use "Action:" ONLY when someone explicitly commits to a specific next step, and "Decision:" ONLY when a clear agreement or choice is made. Use plain bullets for facts, context, and status.\n' +
+      '- Scale bullet count strictly to actual substance (1–8 bullets; never pad a short segment).\n' +
+      '- CRITICAL ANTI-DUPLICATION RULE: Do NOT repeat, rephrase, or duplicate any points already recorded in the prior notes above.\n\n' +
       'Output Rules:\n' +
-      `- Start immediately with "📌 Discussion Update${timeSuffix}:" followed by single hyphen bullets (- ).\n` +
+      `- Start immediately with "📌 Discussion Update${timeSuffix}:" (do NOT put a "- " bullet before the heading) followed by single hyphen bullets (- ).\n` +
       '- Each bullet must start with a single hyphen (- ). Do not wrap bullets in quotes or backticks.\n' +
       '- Do NOT repeat or rewrite earlier notes.\n' +
       '- Do NOT use # or ** symbols.'
@@ -631,15 +638,15 @@ function buildLiveNotesPrompt({
   return (
     (transcriptBlock || 'Call transcript: (none yet)\n\n') +
     'Task — INITIAL MEETING NOTES:\n' +
-    'Generate the structured live meeting notes now using these sections:\n' +
+    'Generate comprehensive, accurate live meeting notes using these sections:\n' +
     '📌 Live Summary:\n' +
-    '- 2–4 concise bullets on the conversation and topics so far.\n\n' +
+    '- 2–5 concrete bullets covering the core topics, who owns what, exact numbers/counts, and any caveats or reasoning discussed.\n\n' +
     '💡 Key Insights & Technical Breakdown:\n' +
-    '- Important takeaways, decisions, and 1-line technical explanations of any tools/terms mentioned.\n\n' +
+    '- Non-obvious takeaways, implications, trade-offs, and how the mentioned systems, tools, or points relate (do not just restate the summary).\n\n' +
     '❓ Follow-Up Questions to Ask:\n' +
-    '- 2–3 unanswered follow-up questions.\n\n' +
+    '- 2–3 sharp, unanswered follow-up questions targeting gaps, risks, or next steps.\n\n' +
     '✅ Action Items:\n' +
-    '- Specific next steps mentioned (or "- None yet." if none).\n\n' +
+    '- Explicit next steps or commitments mentioned (or "- None yet." if none).\n\n' +
     'Each bullet must start with a single hyphen (- ). Do not use # or ** symbols. Output the complete notes.'
   );
 }

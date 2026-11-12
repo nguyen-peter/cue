@@ -151,7 +151,7 @@ test('buildLiveNotesPrompt dynamic scaling for update notes without 2-4 bullet c
     timeLabel: '1:15 PM'
   });
   assert.ok(pUpdate.includes('📌 Discussion Update (1:15 PM):'));
-  assert.ok(pUpdate.includes('Scale bullet count dynamically based on the amount of speech'));
+  assert.ok(pUpdate.includes('Scale bullet count strictly to actual substance'));
   assert.ok(!pUpdate.includes('2–4 concise bullet points'));
 });
 
@@ -294,7 +294,7 @@ test('deduplicateBullets drops repeated and paraphrased questions and discussion
   assert.ok(kept.includes('❓ Questions to Ask (1:31 PM):'));
 });
 
-test('shouldAutoUpdateNotes triggers at turn threshold or word threshold', () => {
+test('shouldAutoUpdateNotes triggers at turn threshold (with word floor) or word threshold', () => {
   // Below both thresholds
   const shortTurns = Array.from({ length: AUTO_NOTES_TURN_THRESHOLD - 1 }, (_, i) => ({
     channel: 'them',
@@ -308,34 +308,47 @@ test('shouldAutoUpdateNotes triggers at turn threshold or word threshold', () =>
     pendingWords: countTranscriptWords(shortTurns)
   }), false);
 
-  // Meets turn threshold (8 turns)
-  const eightTurns = Array.from({ length: AUTO_NOTES_TURN_THRESHOLD }, (_, i) => ({
+  // Meets turn threshold (10 turns) but only tiny chatter (< 80 words): must NOT fire prematurely
+  const chatterTurns = Array.from({ length: AUTO_NOTES_TURN_THRESHOLD }, (_, i) => ({
     channel: 'them',
-    text: `Turn number ${i + 1}`,
+    text: `Okay yeah sure ${i + 1}`,
     ts: i
   }));
   assert.strictEqual(shouldAutoUpdateNotes({
     modeActive: true,
     busy: false,
-    pendingTurns: eightTurns.length,
-    pendingWords: countTranscriptWords(eightTurns)
+    pendingTurns: chatterTurns.length,
+    pendingWords: countTranscriptWords(chatterTurns)
+  }), false);
+
+  // Meets turn threshold (10 turns) with substantive words (>= 80 words)
+  const tenTurns = Array.from({ length: AUTO_NOTES_TURN_THRESHOLD }, (_, i) => ({
+    channel: 'them',
+    text: `We need to review the service deployment timeline and risk assessment for module ${i + 1}`,
+    ts: i
+  }));
+  assert.strictEqual(shouldAutoUpdateNotes({
+    modeActive: true,
+    busy: false,
+    pendingTurns: tenTurns.length,
+    pendingWords: countTranscriptWords(tenTurns)
   }), true);
 
   // Blocked when busy or inactive
   assert.strictEqual(shouldAutoUpdateNotes({
     modeActive: true,
     busy: true,
-    pendingTurns: eightTurns.length,
-    pendingWords: countTranscriptWords(eightTurns)
+    pendingTurns: tenTurns.length,
+    pendingWords: countTranscriptWords(tenTurns)
   }), false);
   assert.strictEqual(shouldAutoUpdateNotes({
     modeActive: false,
     busy: false,
-    pendingTurns: eightTurns.length,
-    pendingWords: countTranscriptWords(eightTurns)
+    pendingTurns: tenTurns.length,
+    pendingWords: countTranscriptWords(tenTurns)
   }), false);
 
-  // Meets word threshold (150+ words) even with 1 long monologue turn
+  // Meets word threshold (200+ words) even with 1 long monologue turn
   const longMonologue = [{
     channel: 'them',
     text: Array.from({ length: AUTO_NOTES_WORD_THRESHOLD }, (_, i) => `word${i}`).join(' '),
