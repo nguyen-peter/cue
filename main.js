@@ -15,6 +15,8 @@ const { createQuestionDetector, normalize: normalizeQuestion } = require('./src/
 const { createQuestionQueue } = require('./src/question-queue');
 const { transcriptThrough } = require('./src/transcript-format');
 const { createChatHistory } = require('./src/chat-history');
+const { pickAdaptiveThinking } = require('./src/adaptive-thinking');
+const { createLeetcodeContext } = require('./src/leetcode-context');
 const { createTokenCoalescer } = require('./src/token-coalesce');
 const {
   LIVE_NOTES_SYSTEM,
@@ -792,6 +794,9 @@ async function setCapturing(active) {
 // stay on the same topic as the last answer. Assist/LeetCode/queue answers
 // stay stateless fresh-look actions.
 const chatHistory = createChatHistory();
+// Last LeetCode solve, kept intact so a later ask can iterate on the real
+// code instead of the 2,000-char clip in chat history. Cleared with the chat.
+const leetcodeCtx = createLeetcodeContext();
 
 // How a non-typed feature appears as the "user side" of a recorded exchange,
 // so a later follow-up can tell what the assistant was responding to.
@@ -857,6 +862,18 @@ async function runFeature(mode, userText, opts) {
       && convo.slice(-3).some(t => t.channel === 'them' && t.text && t.text.trim().length > 12 && !/\b(screen|slide|diagram|code|line|chart|table|shown|look at|here)\b/i.test(t.text));
     const skipScreenForQuick = isQuickMode && ((userText && userText.trim().length > 0) || convo.length > 0);
 
+    // Adaptive thinking (Smart only, never Quick): LOW only for a confidently
+    // simple question, MEDIUM otherwise. The pick and its reason go into the
+    // CUE_PERF trace next to thought_tokens so the picks can be audited after
+    // an interview instead of trusted.
+    const adaptive = (!isQuickMode && settings.smart)
+      ? pickAdaptiveThinking({ model: llm.modelFor(mode), mode, smart: true, userText, category, referencesScreen })
+      : null;
+    if (adaptive) {
+      trace.set('thinking', adaptive.level || 'default');
+      trace.set('adaptive_reason', adaptive.reason);
+    }
+
     const needsScreenNow = def.needsScreen && !skipScreenForTextAsk && !recentThemTurn && !skipScreenForQuick;
 
     // Open the TCP+TLS connection to the provider in parallel with the
@@ -905,11 +922,20 @@ async function runFeature(mode, userText, opts) {
     const built = isQuickMode
       ? buildQuickTurn({ transcript: convo, userText: userText || '' })
       : def.build({ transcript: convo, userText: userText || '', chatHistory: chatHistory.all() });
+    // LeetCode follow-up: if the last solve is still fresh and this question
+    // is about it, attach the intact solution so the model iterates on the
+    // real code instead of the 2,000-char clip in chat history. Quick mode
+    // skips it — its answers are meant to be short and context-free.
+    const lcBlock = (!isQuickMode && (mode === 'ask' || mode === 'answerThis'))
+      ? leetcodeCtx.followupBlock(userText)
+      : null;
+    if (lcBlock) trace.set('leetcode_followup', 'yes');
+    const builtWithSolve = lcBlock ? built + '\n\n' + lcBlock : built;
     const imageDataUrl = await screenshotPromise;
     if (needsScreenNow) trace.mark('screenshot');
     trace.set('system_chars', system.length);
     trace.set('cacheable_prefix_chars', cachePrefixChars);
-    trace.set('prompt_chars', built.length);
+    trace.set('prompt_chars', builtWithSolve.length);
     if (imageDataUrl) trace.set('image_kb', Math.round(imageDataUrl.length * 0.75 / 1024));
     // How long ago this provider's connection was last opened or used. If
     // first_token is consistently slower when this is large (or absent), the
@@ -941,9 +967,10 @@ async function runFeature(mode, userText, opts) {
         llm.stream({
           system,
           cachePrefixChars,
-          turns: [...priorTurns, { role: 'user', text: built }],
+          turns: [...priorTurns, { role: 'user', text: builtWithSolve }],
           imageDataUrl,
           mode,
+          adaptiveThinkingLevel: adaptive && adaptive.level ? adaptive.level : undefined,
           onToken: (t) => {
             if (streamSettled) return;
             tokens.push(t);
@@ -978,6 +1005,9 @@ async function runFeature(mode, userText, opts) {
       ? (userText || '')
       : (HISTORY_LABELS[mode] || mode);
     chatHistory.record(historyUserText, typeof fullText === 'string' ? fullText : '');
+    // Keep the solve intact for follow-ups ("make that faster", "why that
+    // approach?") — chat history alone only keeps the first 2,000 chars.
+    if (mode === 'leetcode') leetcodeCtx.record('', typeof fullText === 'string' ? fullText : '');
     send('llm:done', {});
   } catch (e) {
     recordEvent({ level: 'error', event: 'llm_failed', msg: e && e.message ? e.message : String(e), frame: 'runFeature', context: { mode, provider: store.getSettings().provider } });
@@ -1316,6 +1346,7 @@ ipcMain.handle('transcript:clear', () => {
   notesState.lastTurnIndex = 0;
   clearQuestionQueue();
   chatHistory.clear();
+  leetcodeCtx.clear();
   send('notes:state', getNotesPublicState());
   if (phoneCompanion) phoneCompanion.broadcast('chat:clear', {});
   return { ok: true };
@@ -1498,6 +1529,7 @@ function registerShortcuts() {
   shortcutState.moveRight = globalShortcut.register('CommandOrControl+Alt+Shift+Right', () => moveWindow(STEP, 0));
   shortcutState.clearChat = globalShortcut.register('CommandOrControl+Shift+Backspace', () => {
     chatHistory.clear(); // wiping the visible chat also wipes the model's follow-up memory
+    leetcodeCtx.clear();
     send('chat:clear', {});
   });
   // Answer detected question 1-4 from anywhere. Ctrl/Cmd+Alt avoids browser tab
@@ -1692,6 +1724,7 @@ function launchApp() {
           transcript.splice(0, transcript.length);
           clearQuestionQueue();
           chatHistory.clear();
+          leetcodeCtx.clear();
           send('chat:clear', {});
           break;
         case 'question:add':

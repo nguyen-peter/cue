@@ -284,7 +284,13 @@ function isGeminiThinkingModel(model) {
 // @google/genai 2.x SDK has no XHIGH enum value (it arrived in SDK 3.3.0).
 // If XHIGH is ever needed, bump the SDK major first, then add it as an
 // explicit opt-in, never as a tier default.
-function geminiThinkingConfig(model, mode, smart) {
+//
+// adaptiveLevel (from src/adaptive-thinking.js, via main.js) may lower Smart
+// to LOW for a confidently simple question. It only ever applies to Gemini 4
+// Smart conversational asks: fast stays LOW, LeetCode stays MEDIUM, and
+// 3.x Flash keeps its existing behaviour. Anything other than LOW/MEDIUM is
+// ignored, so a bad caller cannot smuggle MINIMAL or XHIGH in here.
+function geminiThinkingConfig(model, mode, smart, adaptiveLevel) {
   if (!isGeminiThinkingModel(model)) return undefined;
   const leetcode = mode === 'leetcode';
   const major = geminiMajorVersion(model);
@@ -292,7 +298,10 @@ function geminiThinkingConfig(model, mode, smart) {
     // Conversational modes (ask/say/assist/answerThis/transcribe) and
     // LeetCode alike: LOW fast, MEDIUM smart. Never MINIMAL, never the
     // provider's HIGH default.
-    return { thinkingLevel: smart ? 'MEDIUM' : 'LOW', includeThoughts: true };
+    const adaptive = (smart && !leetcode && (adaptiveLevel === 'LOW' || adaptiveLevel === 'MEDIUM'))
+      ? adaptiveLevel
+      : null;
+    return { thinkingLevel: adaptive || (smart ? 'MEDIUM' : 'LOW'), includeThoughts: true };
   }
   if (major >= 3) {
     if (leetcode) return { thinkingLevel: smart ? 'MEDIUM' : 'LOW', includeThoughts: true };
@@ -661,8 +670,11 @@ function createLLM(settings) {
       // Fast tier + conversational mode: keep Gemini's hidden reasoning short.
       // LeetCode always keeps some thinking (answer depth), bounded so hidden
       // tokens cannot eat maxOutputTokens and cut the walkthrough off.
+      // params.adaptiveThinkingLevel is main.js's conservative pick for this
+      // exact question (LOW only when confidently simple); it is honoured
+      // for Gemini 4 Smart conversational asks and ignored everywhere else.
       args.thinkingConfig = provider === 'gemini'
-        ? geminiThinkingConfig(activeModel, params.mode, effectiveSmart)
+        ? geminiThinkingConfig(activeModel, params.mode, effectiveSmart, params.adaptiveThinkingLevel)
         : undefined;
       // Fast-tier GPT-5 / o-series: skip the long hidden reasoning pass. Smart
       // and LeetCode keep the provider default so hard problems stay deep.

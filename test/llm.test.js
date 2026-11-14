@@ -548,6 +548,31 @@ test('Gemini 4 Hydrogen sets LOW fast / MEDIUM smart for QnA modes, never MINIMA
   }
 });
 
+test('Gemini 4 adaptive level may lower Smart to LOW, never to MINIMAL or XHIGH, and never for LeetCode', () => {
+  // A confidently simple Smart ask gets the adaptive LOW; anything else
+  // keeps MEDIUM. The pick itself lives in src/adaptive-thinking.js and is
+  // unit-tested there — here we only pin the plumbing.
+  assert.deepEqual(geminiThinkingConfig('gemini-4-hydrogen', 'ask', true, 'LOW'), { thinkingLevel: 'LOW', includeThoughts: true });
+  assert.deepEqual(geminiThinkingConfig('gemini-4-hydrogen', 'ask', true, 'MEDIUM'), { thinkingLevel: 'MEDIUM', includeThoughts: true });
+  assert.deepEqual(geminiThinkingConfig('gemini-4-hydrogen', 'ask', true), { thinkingLevel: 'MEDIUM', includeThoughts: true });
+  // LeetCode ignores the adaptive level: a wrong-but-fast solution is worse
+  // than a slow correct one.
+  assert.deepEqual(geminiThinkingConfig('gemini-4-hydrogen', 'leetcode', true, 'LOW'), { thinkingLevel: 'MEDIUM', includeThoughts: true });
+  // Fast ignores it too, and junk values are ignored everywhere.
+  assert.deepEqual(geminiThinkingConfig('gemini-4-hydrogen', 'ask', false, 'LOW'), { thinkingLevel: 'LOW', includeThoughts: true });
+  assert.deepEqual(geminiThinkingConfig('gemini-4-hydrogen', 'ask', true, 'MINIMAL'), { thinkingLevel: 'MEDIUM', includeThoughts: true });
+  assert.deepEqual(geminiThinkingConfig('gemini-4-hydrogen', 'ask', true, 'XHIGH'), { thinkingLevel: 'MEDIUM', includeThoughts: true });
+  // 3.x Flash keeps its existing behaviour regardless of the adaptive pick.
+  assert.deepEqual(geminiThinkingConfig('gemini-3.8-flash', 'ask', true, 'LOW'), { includeThoughts: true });
+});
+
+test('Gemini 4 adaptive LOW reaches the SDK through stream params', async () => {
+  const llm = createLLM(geminiSettings({ smart: true }));
+  await llm.stream({ system: 's', turns: [{ role: 'user', text: 'What is a mutex?' }], mode: 'ask', adaptiveThinkingLevel: 'LOW', onToken: () => {} });
+  assert.deepEqual(capturedGeminiRequest.config.thinkingConfig, { thinkingLevel: 'LOW', includeThoughts: true });
+  assert.equal(capturedGeminiRequest.config.maxOutputTokens, 2800);
+});
+
 test('Gemini 4 Carbon and Argon use the same explicit levels as Hydrogen', () => {
   for (const model of ['gemini-4-carbon', 'gemini-4-argon']) {
     assert.deepEqual(geminiThinkingConfig(model, 'ask', false), { thinkingLevel: 'LOW', includeThoughts: true });
