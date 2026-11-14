@@ -3,7 +3,7 @@ const test = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { CURRENT_GEMINI_DEFAULT, CURRENT_GEMINI_SMART_DEFAULT, DEFAULT_MODELS, DEFAULT_SMART_MODELS, createLLM } = require('../src/llm');
+const { CURRENT_GEMINI_DEFAULT, CURRENT_GEMINI_SMART_DEFAULT, DEFAULT_MODELS, DEFAULT_SMART_MODELS, createLLM, geminiThinkingConfig } = require('../src/llm');
 
 // Google retired gemini-2.0-flash on 2026-03-03 (deprecated Feb 2026); every
 // request against it 404s with a generic "exception parsing response" body —
@@ -27,6 +27,27 @@ const FILES_THAT_CALL_GEMINI = [
 
 test('CURRENT_GEMINI_DEFAULT is not a known-retired Gemini model id', () => {
   assert.ok(!DEAD_MODEL_IDS.includes(CURRENT_GEMINI_DEFAULT), `${CURRENT_GEMINI_DEFAULT} is on the known-dead list`);
+});
+
+test('CURRENT_GEMINI_SMART_DEFAULT is Gemini 4 Hydrogen, not a retired id', () => {
+  // Released 2026-11-12 as Google's successor to 3.8 Flash. Fast stays on
+  // 3.5 Flash-Lite; Smart moves to Hydrogen.
+  assert.equal(CURRENT_GEMINI_SMART_DEFAULT, 'gemini-4-hydrogen');
+  assert.ok(!DEAD_MODEL_IDS.includes(CURRENT_GEMINI_SMART_DEFAULT));
+});
+
+test('a user-chosen Gemini 4 Hydrogen model is left alone, and gets an explicit thinking level', () => {
+  const llm = createLLM({ provider: 'gemini', smart: false, apiKeys: { gemini: 'k' }, models: { gemini: { fast: 'gemini-4-hydrogen', smart: 'gemini-4-hydrogen' } } });
+  assert.equal(llm.model, 'gemini-4-hydrogen');
+  // The old code returned undefined here (no "flash" in the id), leaving
+  // Hydrogen on its HIGH provider default. LOW is now set explicitly.
+  assert.deepEqual(geminiThinkingConfig('gemini-4-hydrogen', 'ask', false), { thinkingLevel: 'LOW', includeThoughts: true });
+  assert.deepEqual(geminiThinkingConfig('gemini-4-hydrogen', 'ask', true), { thinkingLevel: 'MEDIUM', includeThoughts: true });
+});
+
+test('a settings file still holding gemini-3.8-flash as Smart is left alone', () => {
+  const llm = createLLM({ provider: 'gemini', smart: true, apiKeys: { gemini: 'k' }, models: { gemini: { fast: 'gemini-3.5-flash-lite', smart: 'gemini-3.8-flash' } } });
+  assert.equal(llm.model, 'gemini-3.8-flash');
 });
 
 for (const relPath of FILES_THAT_CALL_GEMINI) {

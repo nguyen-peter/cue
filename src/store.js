@@ -64,7 +64,7 @@ const DEFAULTS = {
     // Kept in sync with DEFAULT_MODELS / DEFAULT_SMART_MODELS in src/llm.js,
     // which also explains why these ids were chosen and when they were checked.
     anthropic: { fast: 'claude-haiku-5-5', smart: 'claude-sonnet-5-5', quick: '' },
-    gemini: { fast: 'gemini-3.5-flash-lite', smart: 'gemini-3.8-flash', quick: '' },
+    gemini: { fast: 'gemini-3.5-flash-lite', smart: 'gemini-4-hydrogen', quick: '' },
     custom: { fast: '', smart: '', quick: '' },
     ollama: { fast: 'llama3.2', smart: 'llama3.3', quick: '' },
     groq: { fast: 'llama-3.1-8b-instant', smart: 'llama-3.3-70b-versatile', quick: '' },

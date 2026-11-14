@@ -84,7 +84,7 @@ function warmOrigin(url, useNodeAgent) {
 
 const CUSTOM_PROVIDER = 'custom';
 // Default models, checked against each provider's deprecation page on
-// 2026-11-09. Update the date when re-checking.
+// 2026-11-13. Update the date when re-checking.
 //
 // Gemini: gemini-2.0-flash is retired. gemini-2.5-flash, the default after it,
 // is now deprecated too: Google limits it to accounts that already used it,
@@ -92,8 +92,14 @@ const CUSTOM_PROVIDER = 'custom';
 // expects the Gemini 3 thinking parameters. 3.5 Flash-Lite is Google's named
 // replacement for 2.5 Flash and the fastest 3.x model; 3.8 Flash is the current
 // top Flash model. Both are free-tier available and accept audio input.
+// Gemini 4 Hydrogen (gemini-4-hydrogen, released 2026-11-12) is Google's
+// named successor to 3.8 Flash for everyday coding and agentic work, and is
+// now the Smart default: it is faster than 3.8 Flash at the same thinking
+// depth, but only when cue sets thinkingLevel explicitly (see
+// geminiThinkingConfig below). Fast stays on 3.5 Flash-Lite, the fastest
+// model for short QnA, and STT stays on it too (src/stt.js).
 const CURRENT_GEMINI_DEFAULT = 'gemini-3.5-flash-lite';
-const CURRENT_GEMINI_SMART_DEFAULT = 'gemini-3.8-flash';
+const CURRENT_GEMINI_SMART_DEFAULT = 'gemini-4-hydrogen';
 // Anthropic: every Claude 3.x model (including the 3.5 Haiku / 3.5 Sonnet
 // "-latest" aliases cue used to default to) is retired and fails outright.
 // OpenAI: gpt-4o-mini / gpt-4o still work but are scheduled for removal on
@@ -251,16 +257,44 @@ function defaultsToMinimalThinking(model) {
   return /^gemini-3\.5-flash-lite/i.test(String(model || ''));
 }
 
+// Models cue is allowed to set a thinking level on. Flash models, plus the
+// Gemini 4 family (Hydrogen / Carbon / Argon, matched by name, not by the
+// "flash" label they no longer carry). Pro models keep provider defaults
+// (they reject a zero budget).
+function isGeminiThinkingModel(model) {
+  const id = String(model || '');
+  if (/pro/i.test(id)) return false;
+  return /flash/i.test(id) || /^gemini-4-(hydrogen|carbon|argon)/i.test(id) || /^gemini-4\./i.test(id);
+}
+
 // Gemini 2.5 Flash-Lite takes a numeric thinkingBudget (0 = off). Gemini 3+
 // replaced it with thinkingLevel; sending both is a 400, and 3.7/3.8 Flash
 // reject the MINIMAL level, so LOW is the fastest level every 3.x Flash accepts.
 // includeThoughts streams thought summaries while the model reasons — the SDK's
 // chunk.text excludes them, but they tell the caller the stream is alive.
-// Pro models keep provider defaults (they reject a zero budget).
+//
+// Gemini 4 adds a fourth level, XHIGH, and removes MINIMAL entirely: every
+// Gemini 4 model rejects MINIMAL. Hydrogen's provider default is HIGH, which
+// is far too much hidden reasoning for a glance-and-go QnA answer, and its
+// thinking tokens share maxOutputTokens, so a default-HIGH ask can eat the
+// 1400/2800-token conversational cap and truncate the visible answer. Cue
+// therefore always sets the level explicitly for Gemini 4: LOW on the fast
+// tier, MEDIUM on Smart, and the same pair for LeetCode. XHIGH is deliberately
+// never sent: it is for the hardest multi-step work only, and the pinned
+// @google/genai 2.x SDK has no XHIGH enum value (it arrived in SDK 3.3.0).
+// If XHIGH is ever needed, bump the SDK major first, then add it as an
+// explicit opt-in, never as a tier default.
 function geminiThinkingConfig(model, mode, smart) {
-  if (!/flash/i.test(model) || /pro/i.test(model)) return undefined;
+  if (!isGeminiThinkingModel(model)) return undefined;
   const leetcode = mode === 'leetcode';
-  if (geminiMajorVersion(model) >= 3) {
+  const major = geminiMajorVersion(model);
+  if (major >= 4) {
+    // Conversational modes (ask/say/assist/answerThis/transcribe) and
+    // LeetCode alike: LOW fast, MEDIUM smart. Never MINIMAL, never the
+    // provider's HIGH default.
+    return { thinkingLevel: smart ? 'MEDIUM' : 'LOW', includeThoughts: true };
+  }
+  if (major >= 3) {
     if (leetcode) return { thinkingLevel: smart ? 'MEDIUM' : 'LOW', includeThoughts: true };
     if (defaultsToMinimalThinking(model)) {
       // Same model on both tiers would otherwise make Smart a no-op.
@@ -687,5 +721,6 @@ module.exports = {
   FETCH_WARMUP_TTL_MS,
   isReasoningChatModel,
   tokenBudget,
-  geminiThinkingConfig
+  geminiThinkingConfig,
+  isGeminiThinkingModel
 };

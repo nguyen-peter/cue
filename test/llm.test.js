@@ -513,10 +513,67 @@ test('LeetCode on the default Gemini models uses bounded thinking levels', async
   assert.deepEqual(capturedGeminiRequest.config.thinkingConfig, { thinkingLevel: 'MEDIUM', includeThoughts: true });
 });
 
-test('Gemini keeps full thinking depth on the smart tier', async () => {
-  const llm = createLLM(geminiSettings({ smart: true }));
+test('Gemini 3.8 Flash keeps full thinking depth on the smart tier', async () => {
+  // 3.8 Flash Smart intentionally leaves the level to the provider. This is
+  // NOT the default Smart model any more (that is Hydrogen, below); pin the
+  // model explicitly so a default change cannot silently revive this case.
+  const llm = createLLM(geminiSettings({ smart: true, models: { gemini: { fast: 'gemini-3.8-flash', smart: 'gemini-3.8-flash' } } }));
   await llm.stream({ system: 's', turns: [{ role: 'user', text: 'hi' }], mode: 'assist', onToken: () => {} });
+  assert.equal(capturedGeminiRequest.model, 'gemini-3.8-flash');
   assert.deepEqual(capturedGeminiRequest.config.thinkingConfig, { includeThoughts: true });
+});
+
+// ---- Gemini 4 Hydrogen -----------------------------------------------------
+// Released 2026-11-12 as Google's successor to 3.8 Flash. Its provider
+// default is HIGH, and MINIMAL is rejected, so cue must set the level
+// explicitly: LOW on the fast tier, MEDIUM on Smart. Before this fix
+// geminiThinkingConfig only matched model ids containing "flash" and returned
+// undefined for Hydrogen, leaving every QnA ask on the slow HIGH default.
+
+test('Gemini 4 Hydrogen sets LOW fast / MEDIUM smart for QnA modes, never MINIMAL or the provider default', () => {
+  for (const mode of ['ask', 'say', 'assist', 'answerThis', 'transcribe']) {
+    assert.deepEqual(geminiThinkingConfig('gemini-4-hydrogen', mode, false), { thinkingLevel: 'LOW', includeThoughts: true });
+    assert.deepEqual(geminiThinkingConfig('gemini-4-hydrogen', mode, true), { thinkingLevel: 'MEDIUM', includeThoughts: true });
+  }
+  // LeetCode keeps the same bounded pair, so hidden thinking cannot eat the
+  // enlarged output cap the way a HIGH default would.
+  assert.deepEqual(geminiThinkingConfig('gemini-4-hydrogen', 'leetcode', false), { thinkingLevel: 'LOW', includeThoughts: true });
+  assert.deepEqual(geminiThinkingConfig('gemini-4-hydrogen', 'leetcode', true), { thinkingLevel: 'MEDIUM', includeThoughts: true });
+  // No code path in cue sends XHIGH or MINIMAL for Hydrogen.
+  for (const mode of ['ask', 'leetcode']) {
+    for (const smart of [false, true]) {
+      const level = geminiThinkingConfig('gemini-4-hydrogen', mode, smart).thinkingLevel;
+      assert.ok(['LOW', 'MEDIUM'].includes(level), `unexpected Hydrogen level ${level}`);
+    }
+  }
+});
+
+test('Gemini 4 Carbon and Argon use the same explicit levels as Hydrogen', () => {
+  for (const model of ['gemini-4-carbon', 'gemini-4-argon']) {
+    assert.deepEqual(geminiThinkingConfig(model, 'ask', false), { thinkingLevel: 'LOW', includeThoughts: true });
+    assert.deepEqual(geminiThinkingConfig(model, 'ask', true), { thinkingLevel: 'MEDIUM', includeThoughts: true });
+    assert.deepEqual(geminiThinkingConfig(model, 'leetcode', true), { thinkingLevel: 'MEDIUM', includeThoughts: true });
+  }
+  // A Gemini 4 Pro model still keeps provider defaults.
+  assert.equal(geminiThinkingConfig('gemini-4-pro', 'ask', false), undefined);
+});
+
+test('Gemini 4 Hydrogen Smart QnA sends MEDIUM through the SDK with the Smart token cap', async () => {
+  const llm = createLLM(geminiSettings({ smart: true }));
+  await llm.stream({ system: 's', turns: [{ role: 'user', text: 'hi' }], mode: 'ask', onToken: () => {} });
+  assert.equal(capturedGeminiRequest.model, CURRENT_GEMINI_SMART_DEFAULT);
+  assert.equal(capturedGeminiRequest.model, 'gemini-4-hydrogen');
+  assert.equal(capturedGeminiRequest.config.maxOutputTokens, 2800);
+  assert.deepEqual(capturedGeminiRequest.config.thinkingConfig, { thinkingLevel: 'MEDIUM', includeThoughts: true });
+  assert.equal(capturedGeminiRequest.config.thinkingConfig.thinkingBudget, undefined);
+});
+
+test('Gemini 4 Hydrogen Fast QnA sends LOW through the SDK with the Fast token cap', async () => {
+  const llm = createLLM(geminiSettings({ smart: false, models: { gemini: { fast: 'gemini-4-hydrogen', smart: 'gemini-4-hydrogen' } } }));
+  await llm.stream({ system: 's', turns: [{ role: 'user', text: 'hi' }], mode: 'ask', onToken: () => {} });
+  assert.equal(capturedGeminiRequest.model, 'gemini-4-hydrogen');
+  assert.equal(capturedGeminiRequest.config.maxOutputTokens, 1400);
+  assert.deepEqual(capturedGeminiRequest.config.thinkingConfig, { thinkingLevel: 'LOW', includeThoughts: true });
 });
 
 test('Gemini 3+ Flash uses thinkingLevel and never the legacy thinkingBudget', () => {
